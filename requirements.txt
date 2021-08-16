@@ -1,0 +1,8 @@
+pandas
+dask
+urllib3
+jupyterlab
+seaborn
+flake8
+pytest
+pytest-cov

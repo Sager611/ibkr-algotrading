@@ -1,0 +1,40 @@
+## For security reasons, we ignore everything but the
+## most important files, avoiding accidentally including
+## files with sensitive information.
+# Ignore everything
+*
+
+# Unignore relevant files
+!container_inputs
+!container_inputs/conf.yaml
+
+!modules
+!modules/*
+!modules/**/*
+
+!notebooks
+!notebooks/01 - Tutorial.ipynb
+
+!tests
+!tests/*
+!tests/**/*
+
+!generate-certificates.sh
+!interactive.py
+!main.py
+!Makefile
+!README.md
+!requirements.txt
+!start_ibeam.sh
+
+# Ignore all hidden files
+.*
+
+# Ignore all python cache files
+__pycache__/*
+__pycache__/**/*
+**/__pycache__/*
+**/__pycache__/**/*
+
+# Unignore relevant hidden files
+!.gitignore
