@@ -37,4 +37,8 @@ __pycache__/**/*
 **/__pycache__/**/*
 
 # Unignore relevant hidden files
+!.github
+!.github/*
+!.github/**/*
+
 !.gitignore
