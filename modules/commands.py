@@ -8,11 +8,17 @@ from typing import Optional, Union
 from pathlib import Path
 
 if 'HTTP' not in globals():
-    CACERT = Path(__file__).parent.parent.resolve().joinpath('container_inputs').joinpath('cacert.pem')
-    if not CACERT.is_file():
-        raise ValueError('Provide a certificate file saved at: ' + str(CACERT))
-    CACERT = str(CACERT)
-    HTTP = urllib3.PoolManager(cert_reqs='REQUIRED', ca_certs=CACERT)
+    try:
+        CACERT = Path(__file__).parent.parent.resolve().joinpath('container_inputs').joinpath('cacert.pem')
+        if not CACERT.is_file():
+            raise ValueError('Provide a certificate file saved at: ' + str(CACERT))
+        CACERT = str(CACERT)
+        HTTP = urllib3.PoolManager(cert_reqs='REQUIRED', ca_certs=CACERT)
+    except Exception:
+        # do not use certificates
+        # TODO: this is a bad idea !
+        HTTP = urllib3.PoolManager(cert_reqs='CERT_NONE',
+                                   assert_hostname=False)
 
 
 class Request():

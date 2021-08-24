@@ -20,17 +20,67 @@ jobs:
       uses: actions/setup-python@v2
       with:
         python-version: 3.9
+
+    - name: Python cache
+      id: python-cache
+      uses: actions/cache@v2
+      with:
+        path: |
+            env
+            ~/.cache/pip
+        key: ${{ runner.os }}-pipenv-${{ hashFiles('requirements.txt') }}
     - name: Create environment
+      if: steps.python-cache.outputs.cache-hit != 'true'
       run: |
         python -m pip install --upgrade pip
         make
+
+    # TODO: Use certificates!
+    #- name: Generate certificates
+      #run: |
+        #yes | sh generate-certificates.sh
+
+    - name: Install ibeam server
+      run: |
+        # install docker image
+        docker pull voyz/ibeam
+
+    - name: Create env.list file
+      env:
+        IBEAM_ACCOUNT: ${{ secrets.IBKR_ACCOUNT }}
+        IBEAM_PASSWORD: ${{ secrets.IBKR_PASSWORD }}
+        IBEAM_KEY: ${{ secrets.IBKR_KEY }}
+      run: |
+        # create env.list file
+        cat >env.list <<EOF
+        ## this file contains sensitive information!
+        # you can sign in to paper accounts as well
+        IBEAM_ACCOUNT=${IBEAM_ACCOUNT}
+        IBEAM_PASSWORD=${IBEAM_PASSWORD}
+        IBEAM_KEY=${IBEAM_KEY}
+        MAX_FAILED_AUTH=1
+        MAX_IMMEDIATE_ATTEMPTS=1
+        IBEAM_INPUTS_DIR=/srv/inputs
+        EOF
+
+    - name: Start ibeam server
+      run: |
+        # start docker ibeam container
+        #TODO: make certificates work!
+        #docker run -v "${PWD}/container_inputs":/srv/inputs --env-file env.list -p 5000:5000 voyz/ibeam
+        docker run --env-file env.list -p 5000:5000 voyz/ibeam &
+        # wait a bit for the container to authenticate IBKR account
+        sleep 5
+
     - name: Lint with flake8
       run: |
+        # environment contains flake8
         . env/bin/activate
         # stop the build if there are Python syntax errors or undefined names
         flake8 modules --count --select=E9,F63,F7,F82 --show-source --statistics
         # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
         flake8 modules --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
     - name: Test with pytest
       run: |
         . env/bin/activate

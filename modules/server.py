@@ -324,8 +324,6 @@ class StockCache(object):
                     # end of critical section
                     self._main_barrier.release()
                     return stock
-                else:
-                    self._cache_barriers[key].acquire()
             else:
                 # increment miss count
                 self._n_misses += 1

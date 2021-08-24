@@ -5,7 +5,7 @@ listenPort: 5000
 listenSsl: true
 svcEnvironment: "v1"
 sslCert: "cacert.jks"
-sslPwd: "0<:_mej5E8j=-5evC>:I0ZLK<YK~e5"
+sslPwd: "0IYTXROWJ6y%csq)1~s_A3Ny&zeWQ#"
 authDelay: 3000
 portalBaseURL: ""
 serverOptions:
