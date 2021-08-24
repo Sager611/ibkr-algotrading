@@ -9,7 +9,7 @@ Run `make`.
 Execute,
 
 ```shell
-source /env/bin/activate
+. env/bin/activate
 python3 main.py
 ```
 

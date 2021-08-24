@@ -7,11 +7,12 @@ from json.decoder import JSONDecodeError
 from typing import Optional, Union
 from pathlib import Path
 
-CACERT = Path(__file__).parent.parent.resolve().joinpath('container_inputs').joinpath('cacert.pem')
-if not CACERT.is_file():
-    raise ValueError('Provide a certificate file saved at: ' + str(CACERT))
-CACERT = str(CACERT)
-HTTP = urllib3.PoolManager(cert_reqs='REQUIRED', ca_certs=CACERT)
+if 'HTTP' not in globals():
+    CACERT = Path(__file__).parent.parent.resolve().joinpath('container_inputs').joinpath('cacert.pem')
+    if not CACERT.is_file():
+        raise ValueError('Provide a certificate file saved at: ' + str(CACERT))
+    CACERT = str(CACERT)
+    HTTP = urllib3.PoolManager(cert_reqs='REQUIRED', ca_certs=CACERT)
 
 
 class Request():
@@ -39,7 +40,8 @@ class Request():
                 ret = json.loads(r.data)
                 return ret
             except JSONDecodeError:
-                warnings.warn('Non-json content: ' + str(r.data))
+                warnings.warn(f'Non-json response: {str(r.data)} \n\t\t'
+                              f'Body was: {encoded_body}')
                 return
         elif self.method == "GET":
             r = HTTP.request(self.method, url, headers=headers, fields=body_or_fields)
@@ -47,7 +49,8 @@ class Request():
                 ret = json.loads(r.data)
                 return ret
             except JSONDecodeError:
-                warnings.warn('Non-json content: ' + str(r.data))
+                warnings.warn(f'Non-json response: {str(r.data)} \n\t\t'
+                              f'Fields were: {body_or_fields}')
                 return
         else:
             raise TypeError(f'Method not supported: "{self.method}".')

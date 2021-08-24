@@ -1,7 +1,9 @@
 """Contains classes defining the different financial instruments."""
 
-import pandas as pd
 from functools import cached_property
+
+import pandas as pd
+import numpy as np
 
 
 class BaseInstrument(object):
@@ -36,6 +38,22 @@ class Stock(BaseInstrument):
         # historical data
         self.hist = _hist_data_to_dataframe(hist_data)
 
+    @cached_property
+    def bar(self) -> pd.Timedelta:
+        """Represents the time step in the historical data."""
+        if not isinstance(self.hist.index, pd.DatetimeIndex):
+            raise TypeError('The index of the historical data is not in Datetime format. '
+                            f'It is of type: {type(self.hist.index)}')
+        return self.hist.index[1] - self.hist.index[0]
+
+    @property
+    def period(self) -> pd.Timedelta:
+        """The time period in the historical data."""
+        if not isinstance(self.hist.index, pd.DatetimeIndex):
+            raise TypeError('The index of the historical data is not in Datetime format. '
+                            f'It is of type: {type(self.hist.index)}')
+        return self.hist.index[-1] - self.hist.index[0]
+
     def get_returns(self) -> pd.DataFrame:
         """Get returns in the bar of the stock (daily, hourly, etc.)."""
         df = pd.DataFrame(self.hist, columns=['returns'])
@@ -44,18 +62,24 @@ class Stock(BaseInstrument):
         df['returns'][0] = 0
         return df
 
-    @cached_property
-    def bar(self) -> pd.Timestamp:
-        """Represents the time step in the historical data."""
-        if not isinstance(self.hist.index, pd.DatetimeIndex):
-            raise TypeError('The index of the historical data is not in Datetime format. '
-                            f'It is of type: {type(self.hist.index)}')
-        return self.hist.index[1] - self.hist.index[0]
+    def insert(self, hist_data: dict) -> None:
+        """Append new historical data."""
+        df = _hist_data_to_dataframe(hist_data)
+        # this is the best way I found to union in pandas.
+        # first, find set1 \ set2
+        idx = df.index.difference(self.hist.index)
+        # the behavior of copy is not documented (gotta love pandas).
+        # hopefully, it uses less memory.
+        self.hist = pd.concat([self.hist, df.loc[idx]], copy=False)
+        # have to sort the DatetimeIndex to have it in order.
+        # why like this? well, as of Pandas 1.2.3 the .loc[]
+        # approach to add rows does not work with date formats!
+        self.hist.sort_index(inplace=True)
 
-    def buy(self):
+    def buy(self, amount: float):
         raise NotImplementedError()
 
-    def sell(self):
+    def sell(self, amount: float):
         raise NotImplementedError()
 
 
@@ -77,3 +101,20 @@ def _hist_data_to_dataframe(hist_data: dict) -> pd.DataFrame:
     df.set_index('date', inplace=True)
 
     return df
+
+
+class Portfolio(object):
+    """Portfolio class to handle the sell, buy and statistics of multiple stocks."""
+
+    wealth: float
+    stocks: np.ndarray
+    weights: np.ndarray
+
+    def sharpe(self):
+        raise NotImplementedError()
+
+    def buy(self, weights: np.ndarray):
+        raise NotImplementedError()
+
+    def sell(self, weights: np.ndarray):
+        raise NotImplementedError()
