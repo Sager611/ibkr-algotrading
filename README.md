@@ -1,3 +1,5 @@
+![flake8 and pytests](https://github.com/Sager611/ibkr-algotrading/actions/workflows/python-app.yml/badge.svg)
+
 ## Install
 
 Run `make`.
