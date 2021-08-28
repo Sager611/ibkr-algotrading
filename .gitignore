@@ -13,7 +13,8 @@
 !modules/**/*
 
 !notebooks
-!notebooks/01 - Tutorial.ipynb
+!notebooks/01 - Introduction.ipynb
+!notebooks/02 - Portfolios.ipynb
 
 !tests
 !tests/*

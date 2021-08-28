@@ -1,11 +1,14 @@
 """This module contains IBKR HTTP requests in the form of 'commands'."""
 
-import warnings
+import logging
 import urllib3
 import json
+from datetime import datetime
 from json.decoder import JSONDecodeError
 from typing import Optional, Union
 from pathlib import Path
+
+_LOGGER = logging.getLogger('ibkr-algotrading')
 
 if 'HTTP' not in globals():
     try:
@@ -14,8 +17,9 @@ if 'HTTP' not in globals():
             raise ValueError('Provide a certificate file saved at: ' + str(CACERT))
         CACERT = str(CACERT)
         HTTP = urllib3.PoolManager(cert_reqs='REQUIRED', ca_certs=CACERT)
-    except Exception:
+    except Exception as e:
         # do not use certificates
+        _LOGGER.warn(f'Could not use certificates! Exception: {e}')
         # TODO: this is a bad idea !
         HTTP = urllib3.PoolManager(cert_reqs='CERT_NONE',
                                    assert_hostname=False)
@@ -46,8 +50,8 @@ class Request():
                 ret = json.loads(r.data)
                 return ret
             except JSONDecodeError:
-                warnings.warn(f'Non-json response: {str(r.data)} \n\t\t'
-                              f'Body was: {encoded_body}')
+                _LOGGER.warn(f'Non-json response: {str(r.data)} \n\t\t'
+                             f'Body was: {encoded_body}')
                 return
         elif self.method == "GET":
             r = HTTP.request(self.method, url, headers=headers, fields=body_or_fields)
@@ -55,8 +59,8 @@ class Request():
                 ret = json.loads(r.data)
                 return ret
             except JSONDecodeError:
-                warnings.warn(f'Non-json response: {str(r.data)} \n\t\t'
-                              f'Fields were: {body_or_fields}')
+                _LOGGER.warn(f'Non-json response: {str(r.data)} \n\t\t'
+                             f'Fields were: {body_or_fields}')
                 return
         else:
             raise TypeError(f'Method not supported: "{self.method}".')
@@ -85,6 +89,127 @@ class Balance(Request):
             self.set_portfolioId(portfolioId)
 
         return super().__call__(**kwargs)
+
+
+class MarketData(Request):
+    """Get Market Data for the given conid(s).
+
+    The endpoint will return by default bid, ask, last, change, change pct, close, listing exchange.
+    See response fields for a list of available fields that can be request via fields argument.
+    The endpoint /iserver/accounts must be called prior to /iserver/marketdata/snapshot.
+    For derivative contracts the endpoint /iserver/secdef/search must be called first.
+    First /snapshot endpoint call for given conid will initiate the market data request.
+    To receive all available fields the /snapshot endpoint will need to be called several times.
+    To receive streaming market data the endpoint /ws can be used. Refer to Streaming WebSocket Data for details.
+    """
+    api_path = "/iserver/marketdata/snapshot"
+
+    def __call__(self,
+                 conids: Union[str, list[str]],
+                 since: Optional[int] = None,
+                 fields: Union[str, list[str]] = ["31", "83"]) -> Optional[Union[dict, list]]:
+        """Execute request.
+
+        By default it requests the following fields:
+            31	string
+            Last Price - The last price at which the contract traded.
+            "C" identifies this price as the previous day's closing price.
+            "H" means that the trading is halted.
+            ----
+            83 string
+            Change % - The difference between the last price and
+            the close on the previous trading day in percentage.
+        """
+        if type(conids) is list:
+            conids_str = ','.join([str(i) for i in conids])
+        else:
+            conids_str = conids
+
+        if type(fields) is list:
+            fields_str = ','.join(fields)
+        else:
+            fields_str = fields
+
+        req_fields = {
+            "conids": conids_str,
+            "fields": fields_str
+        }
+
+        if since is not None:
+            req_fields["since"] = since
+
+        data = super().__call__(req_fields)
+
+        # if the fields are not in the data, we probably have to
+        # first request our account information
+        for i in range(10):
+            repeat = False
+            if data is None:
+                repeat = True
+            else:
+                for f in fields:
+                    if f not in data[0]:
+                        repeat = True
+                        break
+
+            if repeat:
+                _LOGGER.warn(f'Repeating market data request on conid(s) "{conids}" '
+                             'since there wasn\'t an appropiate response. \n\t\t'
+                             f'Response was: {data}')
+                # try to cancel all the market data requests first
+                MarketDataAllCancel()()
+                # for some reason IBKR asks us to request our portfolio information
+                # before requesting market data, o.w. we supposedly get a bad response.
+                AccountInfo()()
+                PortfoliosInfo()()
+                data = super().__call__(req_fields)
+            else:
+                break
+
+        if i >= 9:
+            _LOGGER.warn(f'Repeated market data request on conids "{conids}" too many times! (10)')
+
+        return data
+
+
+class MarketDataSingleCancel(Request):
+    """Cancel market data for given conid."""
+
+    "https://localhost:5000/v1/api/iserver/marketdata/{conid}/unsubscribe"
+    api_path = None
+    conid = None
+
+    def set_conid(self, conid) -> None:
+        self.conid = conid
+        self.api_path = f'/iserver/marketdata/{conid}/unsubscribe'
+
+    def __call__(self, conid=None, **kwargs) -> Optional[Union[dict, list]]:
+        if self.api_path is None and conid is None:
+            raise ValueError('Please provide portfolioId to check balance.')
+
+        if conid is not None:
+            self.set_conid(conid)
+
+        return super().__call__(**kwargs)
+
+
+class MarketDataAllCancel(Request):
+    """Cancel all market data request(s)."""
+
+    api_path = '/iserver/marketdata/unsubscribeall'
+
+
+class StockInfo(Request):
+    api_path = "/iserver/secdef/search"
+    method = "POST"
+
+    def __call__(self, symbol: str, by_name: bool = False, secType: str = "STK") -> Optional[Union[dict, list]]:
+        body = {
+            "symbol": symbol,
+            "name": by_name,
+            "secType": secType
+        }
+        return super().__call__(body)
 
 
 class MarketDataHistory(Request):
@@ -129,7 +254,7 @@ class PreviewOrders(Request):
         self.api_path = f'/iserver/account/{accountId}/orders/whatif'
 
     def __call__(self,
-                 stocks: list[int],
+                 stocks: list[str],
                  secType: Union[str, list[str]] = "STK",
                  orderType: Union[str, list[str]] = "MKT",
                  side: Union[str, list[str]] = "BUY",
@@ -155,6 +280,10 @@ class PreviewOrders(Request):
         side = _check_arg(side)
         quantity = _check_arg(quantity)
         tif = _check_arg(tif)
+
+        for s in side:
+            if s != "BUY" and s != "SELL":
+                raise ValueError(f'Unrecognized side argument "{s}". Must be: BUY, SELL')
 
         body = {
             "orders": [

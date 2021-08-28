@@ -3,7 +3,7 @@
 import warnings
 from typing import Union
 from modules.commands import \
-    AccountInfo, PortfoliosInfo, \
+    AccountInfo, MarketData, PortfoliosInfo, \
     Balance, StockInfo, \
     PreviewOrders, MarketDataHistory
 
@@ -14,6 +14,7 @@ def menu():
         '''
     a - Account information
     b - Balance
+    d - Search Stock's latest market data
     h - Search Stock's history
     p - Portfolios information
     s - Search Stock information
@@ -66,9 +67,21 @@ def balance():
 
 
 _stocks_cache = {}
+def stock_market_data():
+    req_stock_info = StockInfo()
+    print()
+    stock = input('Provide stock name to preview order of (ex.: AAPL, MSFT, SPY): ')
+    if stock in _stocks_cache:
+        conid = _stocks_cache[stock][0]["conid"]
+    else:
+        conid = req_stock_info(stock)[0]["conid"]
+
+    data = MarketData()(conids=conid)
+    pretty_print(data)
+
+
 def stock_history():
     req_stock_info = StockInfo()
-    stock = ' '
     print()
     stock = input('Provide stock name to preview order of (ex.: AAPL, MSFT, SPY): ')
     if stock in _stocks_cache:
@@ -150,6 +163,8 @@ if __name__ == "__main__":
                     account_info()
                 if o == 'b':
                     balance()
+                if o == 'd':
+                    stock_market_data()
                 if o == 'h':
                     stock_history()
                 if o == 'p':

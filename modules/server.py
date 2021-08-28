@@ -1,5 +1,6 @@
 """Server module to handle requests independently of the computing algorithm(s)."""
 
+from functools import cached_property
 import re
 import time
 import threading
@@ -9,18 +10,20 @@ import logging
 from datetime import datetime
 from math import ceil
 
+import numpy as np
 import pandas as pd
 
 from . import commands as cmd
-from typing import Callable, Iterable, Union
-from .instruments import Stock
+from typing import Callable, Iterable, Optional, Union
+from .instruments import Portfolio, Stock
 from .utils import TracedThread
 
 # max number of market history requests concurrently
 NB_REQUEST_LIMIT = 5
 
-_period_pattern = re.compile(r'(\d+)(min|h|d|w|m|y)')
-_bar_pattern = re.compile(r'(\d+)(min|h|d|w|m)')
+_PERIOD_PATTERN = re.compile(r'(\d+)(min|h|d|w|m|y)')
+_BAR_PATTERN = re.compile(r'(\d+)(min|h|d|w|m)')
+_LOGGER = logging.getLogger('ibkr-algotrading')
 
 
 class Server(object):
@@ -31,13 +34,85 @@ class Server(object):
     """
 
     _stock_cache: 'StockCache'
+    _portfolios: list[Portfolio]
+    _simulated: bool
 
     def __init__(self) -> None:
         self._stock_cache = StockCache(maxmem=100, maxstorage=200)
+        self._portfolios = []
+        self._simulated = False
 
     def start(self) -> None:
         # stock cache will auto-update the historical data with new info
         self._stock_cache.start()
+
+    @cached_property
+    def accountId(self) -> str:
+        """IBKR Account ID to perform orders."""
+        p_data = cmd.PortfoliosInfo()()
+        if type(p_data) is not list:
+            raise TypeError('Request for accountId failed.')
+
+        if len(p_data) > 1:
+            accIDs = ', '.join([str(dat["accountId"]) for dat in p_data])
+            _LOGGER.warn(f'There are multiple account IDs! Using "{p_data[0]["accountId"]}". These are all of them: {accIDs}')
+
+        return str(p_data[0]["accountId"])
+
+    @property
+    def balance(self, accountId: Optional[str] = None) -> tuple[float, str]:
+        """Return for the given account the balance."""
+        p_data = cmd.PortfoliosInfo()()
+
+        if type(p_data) is not list:
+            raise TypeError('Portfolio data is not a list.'
+                            f' Data is: {p_data}')
+
+        if accountId is None:
+            accountId = p_data[0]["accountId"]
+            if len(p_data) > 1:
+                _LOGGER.warn(f'You have {len(p_data)} portfolios. Using the one with accountId: {accountId}')
+
+        data = cmd.Balance()(accountId)
+        currency = list(data.keys())[0]
+        value = data[currency]["settledcash"]
+        return value, currency
+
+    def add_portfolio(self, pf: Portfolio) -> None:
+        if hasattr(pf, 'server'):
+            raise ValueError(f'The portfolio provided is already part of Server: {pf.server}')
+
+        # sum of an empty numpy array is 0.0
+        b = self.balance[0] - self.portfolios_wealth().sum()
+        p_W = pf.wealth
+        if b < p_W:
+            raise ValueError('Cannot add portfolio because it allocates too much wealth. '
+                             f'{p_W} > {b}')
+        self._portfolios += [pf]
+        pf.server = self
+
+    def portfolios_wealth(self) -> np.ndarray:
+        return np.array([pf.wealth for pf in self._portfolios])
+
+    def get_portfolios(self) -> list[Portfolio]:
+        """Return a copy of the server's portfolios.
+
+        :return: numpy array of portfolios.
+            The Portfolio objects are not copied.
+        """
+        return self._portfolios.copy()
+
+    def simulated(self) -> '_SimulatedContext':
+        """Return a simulated context to perform orders without actually spending money.
+
+        Usage:
+
+        .. code-block:: python
+
+            with srv.simulated():
+                ...
+        """
+        return _SimulatedContext(self)
 
     def __getitem__(self, args) -> Union[Stock, list[Stock]]:
         if args is None:
@@ -103,7 +178,7 @@ class Server(object):
 def _validate_period_bar(period, bar):
     """Check inputs are what IBKR is expecting."""
     # period
-    res = _period_pattern.findall(period)
+    res = _PERIOD_PATTERN.findall(period)
     if len(res) == 0:
         raise ValueError(
                 f'Period is in invalid format: {period} \n'
@@ -114,7 +189,7 @@ def _validate_period_bar(period, bar):
     p_val = int(p_val)
 
     # bar
-    res = _bar_pattern.findall(bar)
+    res = _BAR_PATTERN.findall(bar)
     if len(res) == 0:
         raise ValueError(
                 f'bar is in invalid format: {bar} \n'
@@ -220,7 +295,7 @@ class StockCache(object):
         today = datetime.today().timestamp()
         offset = dt - (today - dt * int(today / dt))
 
-        logging.info(f'Started StockCache thread for bar "{bar}". \n\t\t'
+        _LOGGER.info(f'Started StockCache thread for bar "{bar}". \n\t\t'
                      f'Next data update will be in {offset : .2f}s.')
         # sleep in intervals to allow for kill interrupts
         for _ in range(int(offset // sleep_interval)):
@@ -239,7 +314,7 @@ class StockCache(object):
             _validate_period_bar(period, bar)
             _update_stock(stk, period, bar)
 
-            logging.info(f'Updated: {str(stk)} - bar: {bar} - added period: {period}')
+            _LOGGER.info(f'Updated: {str(stk)} - bar: {bar} - added period: {period}')
 
         def _start_callbacks(cbs):
             for func in cbs:
@@ -366,12 +441,12 @@ class StockCache(object):
     def stop_threads(self) -> None:
         # make sure running threads are stopped
         try:
-            logging.info(f'Trying to stop {len(self._bar_threads)} threads..')
+            _LOGGER.info(f'Trying to stop {len(self._bar_threads)} threads..')
             for t in self._bar_threads.values():
                 t.kill()
             for t in self._bar_threads.values():
                 t.join()
-            logging.info('Successfully stopped all StockCache threads.')
+            _LOGGER.info('Successfully stopped all StockCache threads.')
         except BaseException as e:
             warnings.warn('Could not stop StockCache\'s threads. \n\t\t'
                           f'Raised Exception: {e}')
@@ -386,7 +461,7 @@ def _request_stock(stock_name: str, period: str, bar: str) -> Stock:
 
 def _ibkr_to_timedelta(period: str) -> pd.Timedelta:
     """From IBKR's market data time interval format to pandas Timedelta."""
-    res = _period_pattern.findall(period)
+    res = _PERIOD_PATTERN.findall(period)
     if len(res) == 0:
         raise ValueError(
                 f'Period is in invalid format: {period} \n'
@@ -436,3 +511,23 @@ def _seconds_to_ibkr(s: float) -> str:
         return f'{y}y'
 
     raise ValueError(f'Time way too big: {s}s')
+
+
+class _SimulatedContext(object):
+    """Class used by :class:`modules.Server` to simulated orders."""
+    _server: Server
+
+    def __init__(self, srv: Server) -> None:
+        self._server = srv
+
+    def __enter__(self) -> None:
+        _LOGGER.warn('ENTERING SIMULATED CONTEXT. ALL FOLLOWING TRANSACTIONS WILL BE SIMULATED.')
+        self._server._simulated = True
+        for pf in self._server._portfolios:
+            pf._simulated = True
+
+    def __exit__(self, type, value, tb) -> None:
+        _LOGGER.warn('LEAVING SIMULATED CONTEXT. ALL FOLLOWING TRANSACTIONS WILL BE REAL.')
+        self._server._simulated = False
+        for pf in self._server._portfolios:
+            pf._simulated = False
