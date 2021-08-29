@@ -3,7 +3,7 @@
 import logging
 import urllib3
 import json
-from datetime import datetime
+import time
 from json.decoder import JSONDecodeError
 from typing import Optional, Union
 from pathlib import Path
@@ -67,6 +67,15 @@ class Request():
 
 class AccountInfo(Request):
     api_path = "/one/user"
+
+
+class BrokerageAccounts(Request):
+    """Returns a list of accounts the user has trading access to, their respective aliases and the currently selected account.
+
+    Note this endpoint must be called before modifying an order or querying open orders.
+    """
+
+    api_path = "/iserver/accounts"
 
 
 class PortfoliosInfo(Request):
@@ -156,12 +165,11 @@ class MarketData(Request):
                 _LOGGER.warn(f'Repeating market data request on conid(s) "{conids}" '
                              'since there wasn\'t an appropiate response. \n\t\t'
                              f'Response was: {data}')
-                # try to cancel all the market data requests first
-                MarketDataAllCancel()()
-                # for some reason IBKR asks us to request our portfolio information
+                # for some reason IBKR asks us to request our accounts information
                 # before requesting market data, o.w. we supposedly get a bad response.
-                AccountInfo()()
-                PortfoliosInfo()()
+                BrokerageAccounts()()
+                # wait a bit before performing new request
+                time.sleep(0.2)
                 data = super().__call__(req_fields)
             else:
                 break

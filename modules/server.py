@@ -8,12 +8,12 @@ import concurrent
 import warnings
 import logging
 from datetime import datetime
-from math import ceil
 
 import numpy as np
 import pandas as pd
 
 from . import commands as cmd
+from . import utils
 from typing import Callable, Iterable, Optional, Union
 from .instruments import Portfolio, Stock
 from .utils import TracedThread
@@ -21,8 +21,6 @@ from .utils import TracedThread
 # max number of market history requests concurrently
 NB_REQUEST_LIMIT = 5
 
-_PERIOD_PATTERN = re.compile(r'(\d+)(min|h|d|w|m|y)')
-_BAR_PATTERN = re.compile(r'(\d+)(min|h|d|w|m)')
 _LOGGER = logging.getLogger('ibkr-algotrading')
 
 
@@ -73,6 +71,10 @@ class Server(object):
             if len(p_data) > 1:
                 _LOGGER.warn(f'You have {len(p_data)} portfolios. Using the one with accountId: {accountId}')
 
+        # if we are in a simulated context
+        if self._simulated:
+            _LOGGER.warn('Showing real balance, not simulated one.')
+
         data = cmd.Balance()(accountId)
         currency = list(data.keys())[0]
         value = data[currency]["settledcash"]
@@ -113,6 +115,20 @@ class Server(object):
                 ...
         """
         return _SimulatedContext(self)
+
+    def copy_state(self) -> '_ServerState':
+        return _ServerState(self)
+
+    def set_state(self, state: '_ServerState') -> None:
+        self._stock_cache.set(state._stock_cache)
+        # we pray that the order of the portfolios was kept as they were being added
+        new_portfolios = []
+        for i, pf in enumerate(state._portfolios):
+            spf = self._portfolios[i]
+            spf.set(pf)
+            new_portfolios += [spf]
+        self._portfolios = new_portfolios
+        self._simulated = state._simulated
 
     def __getitem__(self, args) -> Union[Stock, list[Stock]]:
         if args is None:
@@ -178,7 +194,7 @@ class Server(object):
 def _validate_period_bar(period, bar):
     """Check inputs are what IBKR is expecting."""
     # period
-    res = _PERIOD_PATTERN.findall(period)
+    res = utils.PERIOD_PATTERN.findall(period)
     if len(res) == 0:
         raise ValueError(
                 f'Period is in invalid format: {period} \n'
@@ -189,7 +205,7 @@ def _validate_period_bar(period, bar):
     p_val = int(p_val)
 
     # bar
-    res = _BAR_PATTERN.findall(bar)
+    res = utils.BAR_PATTERN.findall(bar)
     if len(res) == 0:
         raise ValueError(
                 f'bar is in invalid format: {bar} \n'
@@ -258,6 +274,33 @@ class StockCache(object):
         """Read-only number of cache misses."""
         return self._n_misses
 
+    def copy(self) -> 'StockCache':
+        """Returned stock cache needs to be started again to start threads."""
+        ins = StockCache(self.maxmem, self.maxstorage)
+        ins._cache = {
+            k: stk.copy() for k, stk in self._cache.items()
+        }
+        ins._cache_barriers = {
+            k: threading.Lock() for k in self._cache_barriers.keys()
+        }
+        ins._main_barrier = threading.Lock()
+        # threads have to be started after copy
+        ins._bar_threads = {
+            bar:  TracedThread(target=self._hist_update, args=(bar,))
+            for bar in self._bar_threads.keys()
+        }
+        ins._n_misses = self._n_misses
+        ins._callbacks = self._callbacks.copy()
+        return ins
+
+    def set(self, sc: 'StockCache') -> None:
+        self._cache = sc._cache
+        self._cache_barriers = sc._cache_barriers
+        self._main_barrier = sc._main_barrier
+        self._bar_threads = sc._bar_threads
+        self._n_misses = sc._n_misses
+        self._callbacks = sc._callbacks
+
     def clear(self) -> None:
         with self._main_barrier:
             self._cache.clear()
@@ -266,7 +309,10 @@ class StockCache(object):
             self._n_misses = 0
 
     def start(self) -> None:
-        pass
+        # for copied StackCaches, whose threads are not started by default
+        for t in self._bar_threads.values():
+            if not t.is_alive():
+                t.start()
 
     def add_callback(self, bar: str, func: Callable) -> None:
         with self._main_barrier:
@@ -290,7 +336,7 @@ class StockCache(object):
         :class:`modules.utils.TracedThread`.
         """
         # adhere to the bar's time grid
-        dt = _ibkr_to_timedelta(bar)
+        dt = utils.ibkr_to_timedelta(bar)
         dt = dt.total_seconds()
         today = datetime.today().timestamp()
         offset = dt - (today - dt * int(today / dt))
@@ -309,7 +355,7 @@ class StockCache(object):
             # add just enough data to fill prices until today
             today = datetime.today().timestamp()
             secs = (today - stk.hist.index[-1].timestamp())
-            period = _seconds_to_ibkr(secs)
+            period = utils.seconds_to_ibkr(secs)
 
             _validate_period_bar(period, bar)
             _update_stock(stk, period, bar)
@@ -383,7 +429,7 @@ class StockCache(object):
                 with self._cache_barriers[key]:
                     stock = self._cache[key]
                 # if stored stock's period is shorter, we need to update it
-                if pd.Timestamp.today() - stock.hist.index[0] >= _ibkr_to_timedelta(period):
+                if pd.Timestamp.today() - stock.hist.index[0] >= utils.ibkr_to_timedelta(period):
                     # end of critical section
                     self._main_barrier.release()
                     return stock
@@ -395,7 +441,7 @@ class StockCache(object):
                 with self._cache_barriers[key]:
                     stock = self._cache[key]
                 # if stored stock's period is shorter, we need to update it
-                if pd.Timestamp.today() - stock.hist.index[0] >= _ibkr_to_timedelta(period):
+                if pd.Timestamp.today() - stock.hist.index[0] >= utils.ibkr_to_timedelta(period):
                     # end of critical section
                     self._main_barrier.release()
                     return stock
@@ -459,75 +505,52 @@ def _request_stock(stock_name: str, period: str, bar: str) -> Stock:
     return Stock(info_data, hist_data)
 
 
-def _ibkr_to_timedelta(period: str) -> pd.Timedelta:
-    """From IBKR's market data time interval format to pandas Timedelta."""
-    res = _PERIOD_PATTERN.findall(period)
-    if len(res) == 0:
-        raise ValueError(
-                f'Period is in invalid format: {period} \n'
-                'Expected format: {1-30}min, {1-8}h, {1-1000}d, {1-792}w, {1-182}m, {1-15}y'
-        )
-
-    b_val, b_unit = res[0]
-    if b_unit == 'm':
-        return pd.Timedelta(value=int(b_val) * 30.44, unit='d')
-    if b_unit == 'y':
-        return pd.Timedelta(value=int(b_val) * 365.2425, unit='d')
-    return pd.Timedelta(value=int(b_val), unit=b_unit)
-
-
 def _update_stock(stk: Stock, period: str, bar: str):
     hist_data = cmd.MarketDataHistory()(stk.conid, period=period, bar=bar)
     stk.insert(hist_data)
 
 
-def _seconds_to_ibkr(s: float) -> str:
-    """From seconds to IBKR's market data time interval format."""
-    if s <= 0:
-        raise ValueError(f'Time cannot be 0 or negative (it is {s}s)')
+class _ServerState(object):
+    """Server's state containing all information on instruments and positions.
 
-    min = ceil(s / 60.0)
-    if min <= 30:
-        return f'{min}min'
+    This class is used internally to help set a simulation context.
+    """
 
-    h = ceil(s / 3600.0)
-    if h <= 8:
-        return f'{h}h'
+    _stock_cache: 'StockCache'
+    _portfolios: list[Portfolio]
+    _simulated: bool
 
-    d = ceil(s / 86400.0)
-    if d <= 1000:
-        return f'{d}d'
+    def __init__(self, srv: Server) -> None:
+        self._stock_cache = srv._stock_cache.copy()
 
-    w = ceil(s / 604800.0)
-    if w <= 792:
-        return f'{w}w'
+        # do not copy again the stocks
+        stocks = list(self._stock_cache._cache.values())
 
-    m = ceil(s / 16934400.0)
-    if m <= 182:
-        return f'{m}m'
-
-    y = ceil(s / 220898664.0)
-    if y <= 15:
-        return f'{y}y'
-
-    raise ValueError(f'Time way too big: {s}s')
+        self._portfolios = [pf.copy(stocks=stocks) for pf in srv._portfolios]
+        self._simulated = srv._simulated
 
 
 class _SimulatedContext(object):
     """Class used by :class:`modules.Server` to simulated orders."""
     _server: Server
+    _state: _ServerState
 
     def __init__(self, srv: Server) -> None:
         self._server = srv
 
     def __enter__(self) -> None:
+        if self._server._simulated:
+            raise ValueError('You are already in a simulated context!')
+
         _LOGGER.warn('ENTERING SIMULATED CONTEXT. ALL FOLLOWING TRANSACTIONS WILL BE SIMULATED.')
         self._server._simulated = True
         for pf in self._server._portfolios:
             pf._simulated = True
+        self._state = self._server.copy_state()
 
     def __exit__(self, type, value, tb) -> None:
         _LOGGER.warn('LEAVING SIMULATED CONTEXT. ALL FOLLOWING TRANSACTIONS WILL BE REAL.')
+        self._server.set_state(self._state)
         self._server._simulated = False
         for pf in self._server._portfolios:
             pf._simulated = False
