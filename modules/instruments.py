@@ -80,10 +80,24 @@ class Stock(BaseInstrument):
                             f'It is of type: {type(self.hist.index)}')
         return self.hist.index[-1] - self.hist.index[0]
 
+    def set_hist(self, hist: pd.DataFrame) -> None:
+        """Set historical data, just in case :param:`hist` becomes read-only in the future."""
+        self.hist = hist
+
     def copy(self) -> 'Stock':
         ins = Stock(self._info_data.copy(), self._hist_data.copy())
         ins.hist = self.hist.copy()
         return ins
+
+    def set(self, stk: 'Stock') -> None:
+        self.conid = stk.conid
+        self.symbol = stk.symbol
+        self.companyHeader = stk.companyHeader
+        self.companyName = stk.companyName
+        self._info_data = stk._info_data
+        self._hist_data = stk._hist_data
+
+        self.hist = stk.hist
 
     def get_returns(self) -> pd.DataFrame:
         """Get returns in the bar of the stock (daily, hourly, etc.)."""
@@ -117,8 +131,10 @@ class Stock(BaseInstrument):
             `None`.
         """
         market_data = cmd.MarketData()(conids=self.conid, fields=["31"])
+        if "31" not in market_data[0]:
+            raise ValueError(f'Response market data is in invalid format. Data: {market_data}')
         # 31: the last price at which the contract traded.
-        value = float(market_data[0]["31"])
+        _, value = cmd.MarketData.last_price_to_float(market_data[0]["31"])
         time = pd.to_datetime(market_data[0]["_updated"], unit='ms')
         if type(time) is not pd.Timestamp:
             time = None
@@ -328,6 +344,35 @@ class Portfolio(object):
         """Calculate the Sharpe ratio of the portfolio."""
         raise NotImplementedError()
 
+    def get_stocks_value(self, date: Optional[pd.Timestamp] = None) -> np.ndarray:
+        """Get portfolio's stocks' value today, or at a given date."""
+        if date is None:
+            # TODO: make this parallel
+            stocks_value = np.array([stk.value()[0] for stk in self._stocks])
+        else:
+            stocks_value = []
+            for stk in self._stocks:
+                # first, check if we have to update the historical of the stock
+                if date < stk.hist.index[0]:
+                    today = datetime.today().timestamp()
+                    bar_secs = stk.bar.total_seconds()
+                    period_secs = bar_secs + (today - stk.hist.index[0].timestamp())
+
+                    bar = utils.seconds_to_ibkr(bar_secs)
+                    period = utils.seconds_to_ibkr(period_secs)
+
+                    # TODO: make this parallel accross stocks.
+                    # by requesting the stock from the server,
+                    # we are also updating its historical
+                    self.server[stk.symbol, period, bar]
+
+                # get closest date in the dataframe that is still older than the given date
+                closest_date = stk.hist.index[stk.hist.index.get_loc(date, method='ffill')]
+
+                stocks_value += [stk.hist["close"][closest_date]]
+            stocks_value = np.array(stocks_value)
+        return stocks_value
+
     def order(self, weights: np.ndarray, date: Optional[pd.Timestamp] = None) -> None:
         """Buy or sell stock in order to distribute the portfolio's wealth according to :param:`weights`.
 
@@ -345,48 +390,32 @@ class Portfolio(object):
         _validate_portfolio_weights(self._stocks, weights)
 
         # get stocks value today or at given date
-        if date is None:
-            stocks_value = np.array([stk.value()[0] for stk in self._stocks])
-        else:
-            stocks_value = []
-            for stk in self._stocks:
-                # first, check if we have to update the historical of the stock
-                if date < stk.hist.index[0]:
-                    today = datetime.today().timestamp()
-                    period_secs = (today - stk.hist.index[-1].timestamp())
-                    bar_secs = stk.bar.timestamp()
+        stocks_value = self.get_stocks_value(date)
 
-                    # if, somehow, the period is smaller that the bar
-                    if period_secs < bar_secs:
-                        period_secs = bar_secs
+        W = self.wealth
+        adj_W = W
+        comm = 0.0
+        diff = np.zeros_like(self._alloc)
 
-                    period = utils.seconds_to_ibkr(period_secs)
-                    bar = utils.seconds_to_ibkr(bar_secs)
+        for _ in range(10):
+            prev_adj_W = adj_W
+            # how many shares we need for each stock
+            new_alloc = weights * adj_W / stocks_value
+            # how much we have to buy/sell
+            diff = new_alloc - self._alloc
 
-                    # by requesting the stock from the server,
-                    # we are also updating its historical
-                    self.server[stk.symbol, period, bar]
+            # the is a limited precision to the fraction of stock, or share, we can buy/sell.
+            # we will adjust diff for that.
+            diff = np.round(diff / MIN_ORDER_AMOUNT_VARIATION) * MIN_ORDER_AMOUNT_VARIATION
 
-                # if the date is not stored in the stocks historical,
-                # we cannot really perform an accurate simulated order
-                if date not in stk.hist.index:
-                    raise ValueError(f'date "{date}" is not in stock "{stk}" historical data.')
+            # for the order, we have to take into account the commission taken by IBKR
+            comm = utils.get_transaction_commission(weights * adj_W, diff, self._stocks, self.server)
 
-                stocks_value += [stk.hist["close"][date]]
-            stocks_value = np.array(stocks_value)
-
-        # for the order, we have to take into account the commission taken by IBKR
-        prev_wealth = self.wealth
-        W = utils.get_adjusted_wealth(prev_wealth)
-
-        # how many shares we need for each stock
-        new_alloc = weights * W / stocks_value
-        # how much we have to buy/sell
-        diff = new_alloc - self._alloc
-
-        # the is a limited precision to the fraction of stock, or share, we can buy/sell.
-        # we will adjust diff for that.
-        diff = np.round(diff / MIN_ORDER_AMOUNT_VARIATION) * MIN_ORDER_AMOUNT_VARIATION
+            # update how much wealth we are actually have to transact so that
+            # (trans. cost + commission) = wealth
+            adj_W = W - comm
+            if abs(adj_W - prev_adj_W) < 1e-6:
+                break
 
         # first, get an estimate for the commissions
         commissions, shares, total_spent = self.preview_order(diff)
@@ -399,7 +428,7 @@ class Portfolio(object):
             # for the simulation, we use the previewed order as if it were real
             self._alloc += diff
             # add to the commissions. this is an estimation for the actual commission.
-            self._commission += prev_wealth - self.wealth
+            self._commission += comm
         else:
             # TODO: implement this
             _LOGGER.info('REAL ORDER!!!!!!!')
@@ -454,7 +483,7 @@ class Portfolio(object):
                 for d, stk in zip(diff, self._stocks)
             ]
             # join threads
-            for f, d in zip(futures, diff):
+            for f in futures:
                 c, s, t = f.result()
                 if c is None:
                     continue

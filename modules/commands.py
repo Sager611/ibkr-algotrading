@@ -1,5 +1,6 @@
 """This module contains IBKR HTTP requests in the form of 'commands'."""
 
+import re
 import logging
 import urllib3
 import json
@@ -112,6 +113,30 @@ class MarketData(Request):
     To receive streaming market data the endpoint /ws can be used. Refer to Streaming WebSocket Data for details.
     """
     api_path = "/iserver/marketdata/snapshot"
+    LAST_PRICE_PATTERN = re.compile(r'(C|H)?([\d.]+)')
+
+    @classmethod
+    def last_price_to_float(cls, price: str) -> tuple[str, float]:
+        """IBKR's field 31 has a particular format.
+
+        31 format specification:
+        The last price at which the contract traded.
+        "C" identifies this price as the previous day's closing price.
+        "H" means that the trading is halted.
+
+        :return: type of price or empty string, and value of price
+        :rtype: str, float
+        """
+        res = cls.LAST_PRICE_PATTERN.findall(price)
+        if len(res) == 0:
+            raise ValueError(
+                f'Price is in invalid format: {price} \n'
+                'Expected format: 20.0, C1.02, H321.1'
+            )
+
+        typ, val = res[0]
+        val = float(val)
+        return typ, val
 
     def __call__(self,
                  conids: Union[str, list[str]],
@@ -169,7 +194,7 @@ class MarketData(Request):
                 # before requesting market data, o.w. we supposedly get a bad response.
                 BrokerageAccounts()()
                 # wait a bit before performing new request
-                time.sleep(0.2)
+                time.sleep(0.5)
                 data = super().__call__(req_fields)
             else:
                 break

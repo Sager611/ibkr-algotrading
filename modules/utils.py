@@ -3,12 +3,12 @@
 import re
 import sys
 import time
-import trace
 import logging
 import threading
 from math import ceil
 
 import pandas as pd
+import numpy as np
 
 # IBKR's fraction of wealth that is taken as commission
 IBKR_COMMISSION_FRACTION = 0.01
@@ -111,18 +111,16 @@ def seconds_to_ibkr(s: float) -> str:
     raise ValueError(f'Time way too big: {s}s')
 
 
-def get_adjusted_wealth(quantity: float, n_orders: int = 1) -> float:
-    """Return the amount of wealth we can use in a single order so as to match :param:`quantity`.
+def get_transaction_commission(transact: np.ndarray, diff: np.ndarray, stocks: np.ndarray, srv) -> float:
+    """Return the commission taken by IBKR after buy/sell transactions.
 
-    If we have 100. USD and want to use it all to buy and/or sell some stocks, we can't simply
-    perform the transaction as we will spend 100. * (1. + COMMISSION) USD.
-    This function returns the amount X required to spend X * (1 + COMMISSION) = 100. USD in
-    the transactions.
-
-    :param quantity: total wealth we have at our disposition to spend
-    :param n_orders: how many times we'll spend all of our wealth in transactions.
-        Defaults to 1.
-    :return: actual amount of wealth we should use in the transactions in order to, in the end,
-        spend the provided input :param:`quantity`.
+    :param transact: buy (>0)/ sell (<0) transactions that will take place in units of currency
+    :param diff: shares being bought (>0)/sold (<0) for each stock
+    :param stocks: stocks being bought/sold
+    :param srv: Server context
+    :return: commission.
+    :rtype: float
     """
-    return quantity / (1. + IBKR_COMMISSION_FRACTION) ** n_orders
+    # TODO: commissions are probably more complex than this
+    comm = np.abs(transact).sum() * IBKR_COMMISSION_FRACTION
+    return comm

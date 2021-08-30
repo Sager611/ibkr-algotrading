@@ -434,17 +434,18 @@ class StockCache(object):
                     self._main_barrier.release()
                     return stock
                 else:
-                    self._cache_barriers[key].acquire()
-            # this condition should not be possibly true! (since we init the _cache to None)
-            elif key in self._cache_barriers:
-                warnings.warn(f'A race condition happened when requesting key "{key}"!')
-                with self._cache_barriers[key]:
-                    stock = self._cache[key]
-                # if stored stock's period is shorter, we need to update it
-                if pd.Timestamp.today() - stock.hist.index[0] >= utils.ibkr_to_timedelta(period):
-                    # end of critical section
-                    self._main_barrier.release()
+                    # do not request NEW stock! instead update the existing one
+                    with self._cache_barriers[key]:
+                        self._main_barrier.release()
+                        # request new stock
+                        new_stock = _request_stock(name, period, bar)
+                        # set stock to newly gotten stock
+                        stock.set(new_stock)
                     return stock
+            # this condition should not be possibly true! (since we init the _cache to None)
+            # elif key in self._cache_barriers:
+                # warnings.warn(f'A race condition happened when requesting key "{key}"!')
+                # ...
             else:
                 # increment miss count
                 self._n_misses += 1
@@ -477,7 +478,8 @@ class StockCache(object):
 
         # request new stock
         stock = _request_stock(name, period, bar)
-        self._cache[key] = stock
+        with self._main_barrier:
+            self._cache[key] = stock
 
         # unlock this stock's mutex
         self._cache_barriers[key].release()
