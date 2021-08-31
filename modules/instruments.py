@@ -121,24 +121,42 @@ class Stock(BaseInstrument):
         # approach to add rows does not work with a Datetime index!
         self.hist.sort_index(inplace=True)
 
-    def value(self) -> tuple[float, Optional[pd.Timestamp]]:
+    def get_closest_date(self, date: pd.Timestamp) -> pd.Timestamp:
+        return self.hist.index[self.hist.index.get_loc(date, method='ffill')]
+
+    def value(self, date: Optional[pd.Timestamp] = None) -> tuple[float, Optional[pd.Timestamp]]:
         """Return best-effort current value of the stock and its time.
 
         Please note that the returning time is in UTC format, not the system's datetime format.
+
+        If you provide a date, the function will return the close value of the stock
+        at the closest historical data date, that is also older than the provided date.
 
         :return: the stock's value and its corresponding time. If time cannot for some
             reason be converted to a pandas Timestamp, this method returns the value and
             `None`.
         """
-        market_data = cmd.MarketData()(conids=self.conid, fields=["31"])
-        if "31" not in market_data[0]:
-            raise ValueError(f'Response market data is in invalid format. Data: {market_data}')
-        # 31: the last price at which the contract traded.
-        _, value = cmd.MarketData.last_price_to_float(market_data[0]["31"])
-        time = pd.to_datetime(market_data[0]["_updated"], unit='ms')
-        if type(time) is not pd.Timestamp:
-            time = None
-        return value, time
+        if date is None:
+            market_data = cmd.MarketData()(conids=self.conid, fields=["31"])
+            if "31" not in market_data[0]:
+                raise ValueError(f'Response market data is in invalid format. Data: {market_data}')
+            # 31: the last price at which the contract traded.
+            _, value = cmd.MarketData.last_price_to_float(market_data[0]["31"])
+            if "_updated" in market_data[0]:
+                time = pd.to_datetime(market_data[0]["_updated"], unit='ms')
+                if type(time) is not pd.Timestamp:
+                    time = None
+            else:
+                time = None
+            return value, time
+        else:
+            if date < self.hist.index[0]:
+                raise ValueError(f'Date "{date}" is too old. Oldest stored date is: {self.hist.index[0]}')
+
+            # get closest date in the dataframe that is still older than the given date
+            closest_date = self.get_closest_date(date)
+
+            return float(self.hist["close"][closest_date]), closest_date
 
     def buy(self, amount: float, srv):
         raise NotImplementedError()
@@ -157,10 +175,10 @@ class Stock(BaseInstrument):
         if quantity < MIN_ORDER_AMOUNT_VARIATION:
             raise ValueError(f'Quantity must be >={MIN_ORDER_AMOUNT_VARIATION}. It is: {quantity}')
 
-        if quantity % MIN_ORDER_AMOUNT_VARIATION != 0.0:
+        if quantity % MIN_ORDER_AMOUNT_VARIATION > 1e-8:
             _LOGGER.warn(f'Provided quantity for stock "{str(self)}" is too precise. '
                          f'The following amount will be lost: {quantity % MIN_ORDER_AMOUNT_VARIATION}')
-            quantity = round(quantity / MIN_ORDER_AMOUNT_VARIATION) * MIN_ORDER_AMOUNT_VARIATION
+        quantity = round(quantity / MIN_ORDER_AMOUNT_VARIATION) * MIN_ORDER_AMOUNT_VARIATION
 
         data = cmd.PreviewOrders()(
             stocks=[self.conid],
@@ -209,6 +227,7 @@ class Stock(BaseInstrument):
         return comm, share_val, total
 
     def __eq__(self, other) -> bool:
+        # we implement this magic method so the if .. in .. condition works as we'd like
         if type(other) is Stock:
             return (self.bar == other.bar) and (self.conid == other.conid)
         return False
@@ -259,7 +278,10 @@ class Portfolio(object):
 
     @property
     def wealth(self) -> float:
-        """Wealth property is read-only."""
+        """Amount of currency allocated to stock shares, or initial wealth if portfolio is empty.
+
+        Wealth property is read-only.
+        """
         # if there is no allocation, we still haven't
         # bought any stock
         if np.allclose(self._alloc, 0.0):
@@ -305,7 +327,7 @@ class Portfolio(object):
 
     @property
     def orders(self) -> pd.DataFrame:
-        """Dataframe with the dates of execution for all orders and weights used.
+        """Dataframe with the dates of execution for all orders and shares bought.
 
         Orders property is read-only.
         """
@@ -340,9 +362,101 @@ class Portfolio(object):
         self._commission = pf._commission
         self._orders = pf._orders
 
-    def sharpe(self):
-        """Calculate the Sharpe ratio of the portfolio."""
-        raise NotImplementedError()
+    def get_returns(self, end_date: Optional[pd.Timestamp] = None) -> pd.DataFrame:
+        """Provide portfolio's returns in time."""
+        if len(self._stocks) == 0:
+            raise ValueError('Cannot calculate returns because there are no stocks in the portfolio')
+
+        bar = self._stocks[0].bar
+        for stk in self._stocks[1:]:
+            if stk.bar != bar:
+                raise ValueError('Cannot calculate Sharpe ratio because there are different bars'
+                                 f'{self._stocks[0]} has bar "{bar}" while {stk} has bar "{stk.bar}"')
+
+        # if end_date is not provided, we use the closest one to today
+        # from stocks' historical
+        if end_date is None:
+            end_date = self._stocks[0].hist.index[-1]
+        else:
+            end_date = self._stocks[0].get_closest_date(end_date)
+
+        order_dates = [
+            self._stocks[0].get_closest_date(d) for d in self._orders.index if d <= end_date
+        ]
+
+        returns = pd.DataFrame(index=pd.DatetimeIndex([]), columns=['returns'])
+        prev_val = 0.0
+        # _orders index is assumed to be in chronological order
+        for i, order_date in enumerate(order_dates):
+            if i < len(self._orders) - 1:
+                next_date = self._orders.index[i+1] - bar
+            else:
+                next_date = end_date
+            if order_date > next_date:
+                raise ValueError('Saved orders are not in chronological order: '
+                                 f'{order_date} > {next_date} i: {i}')
+
+            ref = self._stocks[0].hist[order_date:next_date]
+            stocks_value = np.stack(
+                [utils.fill_like(stk.hist[order_date:next_date], ref)['close'].values
+                 for stk in self._stocks]
+            ).T
+            # value each date for the portfolio
+            port_val = (stocks_value * self._orders.iloc[i].values[np.newaxis, :]).sum(axis=1)
+            rets = np.empty_like(port_val)
+            rets[1:] = port_val[1:] / port_val[:-1] - 1
+
+            # we have to take into account the returns accross orders as well
+            if i > 0:
+                rets[0] = port_val[0] / prev_val - 1
+            prev_val = port_val[-1]
+
+            idx = ref.index
+            # for the first order, we ignore the 0 return, since just in that moment we put our
+            # portfolio's wealth into the market for the first time
+            if i == 0:
+                idx = idx[1:]
+                rets = rets[1:]
+
+            rets = pd.DataFrame(rets, index=idx, columns=['returns'])
+
+            returns = pd.concat([returns, rets])
+
+        return returns
+
+    def sharpe(self, end_date: Optional[pd.Timestamp] = None) -> float:
+        """Calculate the Sharpe ratio of the portfolio.
+
+        Computes the following formula:
+            S = E[R_p - R_f] / std[R_p - R_f]
+        where R_p are the returns and R_f are the risk-free rates
+        """
+        if not hasattr(self, 'server'):
+            raise RuntimeError('Cannot calculate Sharpe ratio because the portfolio is not part of any server.')
+
+        if len(self._stocks) == 0:
+            raise ValueError('Cannot calculate Sharpe ratio because there are no stocks in the portfolio')
+
+        bar = self._stocks[0].bar
+        for stk in self._stocks[1:]:
+            if stk.bar != bar:
+                raise ValueError('Cannot calculate Sharpe ratio because there are different bars'
+                                 f'{self._stocks[0]} has bar "{bar}" while {stk} has bar "{stk.bar}"')
+
+        R_p = self.get_returns(end_date=end_date)
+
+        # retrieve risk-free rates
+        R_f = [
+            self.server.risk_free_rot(date=date, dt=bar)[0] for date in R_p.index
+        ]
+        # to numpy
+        R_p = R_p['returns'].values
+
+        # factor so sharpe ratio is the same no matter the bar.
+        # we assume a 252 trading year
+        K = np.sqrt(pd.Timedelta(days=252) / bar)
+
+        return K * np.mean(R_p - R_f) / np.std(R_p - R_f)
 
     def get_stocks_value(self, date: Optional[pd.Timestamp] = None) -> np.ndarray:
         """Get portfolio's stocks' value today, or at a given date."""
@@ -387,12 +501,18 @@ class Portfolio(object):
         if not self._simulated and date is not None:
             raise ValueError('You can only place an order back in time in a simulated context!')
 
+        if date is not None and len(self._orders) > 0 and  date < self._orders.index[-1]:
+            raise ValueError('You have to perform orders in chronological order. '
+                             f'Provided date: {date} | Last order\'s date: {self._orders.index[-1]}')
+
         _validate_portfolio_weights(self._stocks, weights)
 
         # get stocks value today or at given date
         stocks_value = self.get_stocks_value(date)
 
+        # wealth that we have at our disposition
         W = self.wealth
+
         adj_W = W
         comm = 0.0
         diff = np.zeros_like(self._alloc)
@@ -404,7 +524,7 @@ class Portfolio(object):
             # how much we have to buy/sell
             diff = new_alloc - self._alloc
 
-            # the is a limited precision to the fraction of stock, or share, we can buy/sell.
+            # there is a limited precision to the fraction of stock, or share, we can buy/sell.
             # we will adjust diff for that.
             diff = np.round(diff / MIN_ORDER_AMOUNT_VARIATION) * MIN_ORDER_AMOUNT_VARIATION
 
@@ -439,9 +559,9 @@ class Portfolio(object):
             order_date = pd.Timestamp.today()
         else:
             order_date = date
-        self._save_order(order_date, weights)
+        self._save_order(order_date)
 
-    def _save_order(self, date, weights) -> None:
+    def _save_order(self, date) -> None:
         # first, insert new stock columns
         symbols = [stk.symbol for stk in self._stocks]
         for sym in symbols:
@@ -449,8 +569,8 @@ class Portfolio(object):
                 continue
             # default weight value is 0, meaning the stock didn't have any allocated wealth
             self._orders.insert(len(self._orders.columns), column=sym, value=0)
-        # now, introduce weights
-        self._orders.loc[date, symbols] = weights
+        # now, introduce shares
+        self._orders.loc[date, symbols] = self._alloc
 
     def preview_order(self, diff: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Preview order.

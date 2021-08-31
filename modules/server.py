@@ -80,6 +80,46 @@ class Server(object):
         value = data[currency]["settledcash"]
         return value, currency
 
+    def risk_free_rot(self,
+                      date: Optional[pd.Timestamp] = None,
+                      dt: pd.Timedelta = pd.Timedelta(days=1),
+                      period: str = '1y',
+                      bar: str = '1d'
+                      ) -> tuple[float, Optional[pd.Timestamp]]:
+        """Risk free rate of return.
+
+        Reference:
+        Ford, G. S. (2019). Estimating Betas in Practice: Alternatives that Matter and Those that Do Not.
+        https://phoenix-center.org/perspectives/Perspective19-01Final.pdf
+        """
+        # IRX: 13 Week Treasury Bill
+        irx = self['IRX', period, bar]
+        if date is not None:
+            # first, check if we have to update the historical of the stock
+            if date < irx.hist.index[0]:
+                today = datetime.today().timestamp()
+                bar_secs = irx.bar.total_seconds()
+                # we take the period to the given date + 13 weeks
+                weeks13_secs = pd.Timedelta(days=13*7).total_seconds()
+                period_secs = bar_secs + (today - date.timestamp()) + weeks13_secs
+
+                period = utils.seconds_to_ibkr(period_secs)
+
+                # by requesting the stock from the server,
+                # we are also updating its historical
+                self[irx.symbol, period, bar]
+        # we are calculating the yield at t-1
+        val_t_1, rf_date = irx.value(date)
+        # for some reason IBKR's IRX are in bps, or tenths of a percent
+        y_t_1 = val_t_1 / 10.0 / 100.0
+
+        q = utils.ibkr_to_timedelta('13w') / dt
+
+        rf = (1 / (1 - y_t_1 * 0.25)) ** (1/q) - 1
+        if date is None:
+            rf_date = pd.Timestamp.today()
+        return rf, rf_date
+
     def add_portfolio(self, pf: Portfolio) -> None:
         if hasattr(pf, 'server'):
             raise ValueError(f'The portfolio provided is already part of Server: {pf.server}')
@@ -201,9 +241,6 @@ def _validate_period_bar(period, bar):
                 'Expected format: {1-30}min, {1-8}h, {1-1000}d, {1-792}w, {1-182}m, {1-15}y'
         )
 
-    p_val, p_unit = res[0]
-    p_val = int(p_val)
-
     # bar
     res = utils.BAR_PATTERN.findall(bar)
     if len(res) == 0:
@@ -212,17 +249,7 @@ def _validate_period_bar(period, bar):
                 'Expected format: 1min, 2min, 3min, 5min, 10min, 15min, 30min, 1h, 2h, 3h, 4h, 8h, 1d, 1w, 1m'
         )
 
-    b_val, b_unit = res[0]
-    b_val = int(b_val)
-
-    unit_to_val = {'min': 0, 'h': 1, 'd': 2, 'w': 3, 'm': 4, 'y': 5}
-    p_unit_ = unit_to_val[p_unit]
-    b_unit_ = unit_to_val[b_unit]
-    if (
-        b_unit_ > p_unit_
-        or (b_unit_ == p_unit_ and b_val > p_val)
-        or p_val == 0
-    ):
+    if (utils.ibkr_to_timedelta(bar) > utils.ibkr_to_timedelta(period)):
         raise ValueError(f'Bar is larger than period: {bar} > {period}')
 
 def _validate_stock_equality(stock_name, period, bar, target_stock):
@@ -476,10 +503,16 @@ class StockCache(object):
         # end of critical section
         self._main_barrier.release()
 
-        # request new stock
-        stock = _request_stock(name, period, bar)
-        with self._main_barrier:
-            self._cache[key] = stock
+        try:
+            # request new stock
+            stock = _request_stock(name, period, bar)
+            with self._main_barrier:
+                self._cache[key] = stock
+        except Exception as e:
+            self._cache.pop(key)
+            # unlock this stock's mutex
+            self._cache_barriers[key].release()
+            raise e
 
         # unlock this stock's mutex
         self._cache_barriers[key].release()
@@ -503,6 +536,10 @@ class StockCache(object):
 def _request_stock(stock_name: str, period: str, bar: str) -> Stock:
     """Return stock specified by the arguments and stores it following a LRU cache."""
     info_data = cmd.StockInfo()(stock_name)
+    try:
+        info_data[0]["conid"]
+    except Exception:
+        raise ValueError(f'Unexpected response. Data: {info_data}')
     hist_data = cmd.MarketDataHistory()(info_data[0]["conid"], period=period, bar=bar)
     return Stock(info_data, hist_data)
 

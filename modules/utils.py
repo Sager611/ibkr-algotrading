@@ -124,3 +124,14 @@ def get_transaction_commission(transact: np.ndarray, diff: np.ndarray, stocks: n
     # TODO: commissions are probably more complex than this
     comm = np.abs(transact).sum() * IBKR_COMMISSION_FRACTION
     return comm
+
+def fill_like(df1: pd.DataFrame, df2: pd.DataFrame) -> pd.DataFrame:
+    """Return copy of df1 with added rows so as to match the indices in df2.
+
+    Inputs are assumed to be historical data.
+    """
+    ret = df1.iloc[0:0, :].copy()
+    for i in df2.index:
+        j = df1.index.get_loc(i, method='ffill')
+        ret.loc[i] = df1.iloc[j]
+    return ret

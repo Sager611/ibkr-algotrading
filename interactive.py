@@ -5,7 +5,7 @@ from typing import Union
 from modules.commands import \
     AccountInfo, MarketData, PortfoliosInfo, \
     Balance, StockInfo, \
-    PreviewOrders, MarketDataHistory
+    PreviewOrders, MarketDataHistory, TradingSchedule
 
 
 def menu():
@@ -18,6 +18,7 @@ def menu():
     h - Search Stock's history
     p - Portfolios information
     s - Search Stock information
+    t - Trading schedule query
     x - Preview orders
     q - Quit
         '''
@@ -153,6 +154,16 @@ def stock_info():
         pretty_print(data)
 
 
+def trading_schedule():
+    print()
+    cls = input('Provide asset class ("STK", "OPT", "FUT", "CFD", "WAR", "SWP", "FND", "BND", "ICS"): ')
+    symbol = input('Provide a symbol (ex.: AAPL, MSFT, SPY): ')
+    data = TradingSchedule()(assetClass=cls, symbol=symbol)
+    pretty_print(data)
+    print('id: ', data[0]["id"])
+    print('tradeVenueId: ', data[0]["tradeVenueId"])
+
+
 if __name__ == "__main__":
     opts = ''
     while opts != 'q':
@@ -171,6 +182,8 @@ if __name__ == "__main__":
                     portfolios_info()
                 if o == 's':
                     stock_info()
+                if o == 't':
+                    trading_schedule()
                 if o == 'x':
                     preview_orders()
             except Exception as e:

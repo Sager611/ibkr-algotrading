@@ -51,7 +51,11 @@ class Request():
                 ret = json.loads(r.data)
                 return ret
             except JSONDecodeError:
+                extra_str = ''
+                if r.status // 500 == 1:
+                    extra_str = '(Internal server error)'
                 _LOGGER.warn(f'Non-json response: {str(r.data)} \n\t\t'
+                             f'Status was: {r.status} {extra_str} \n\t\t'
                              f'Body was: {encoded_body}')
                 return
         elif self.method == "GET":
@@ -60,7 +64,11 @@ class Request():
                 ret = json.loads(r.data)
                 return ret
             except JSONDecodeError:
+                extra_str = ''
+                if r.status // 500 == 1:
+                    extra_str = '(Internal server error)'
                 _LOGGER.warn(f'Non-json response: {str(r.data)} \n\t\t'
+                             f'Status was: {r.status} {extra_str} \n\t\t'
                              f'Fields were: {body_or_fields}')
                 return
         else:
@@ -245,6 +253,38 @@ class StockInfo(Request):
         return super().__call__(body)
 
 
+class TradingSchedule(Request):
+    """Return the trading schedule up to a month for the requested contract."""
+
+    api_path = "/trsrv/secdef/schedule"
+    VALID_ASSETCLASSES = ["STK", "OPT", "FUT", "CFD", "WAR", "SWP", "FND", "BND", "ICS"]
+
+    def __call__(self,
+                 assetClass: str,
+                 symbol: str,
+                 exchange: Optional[str] = None,
+                 exchangeFilter: Optional[str] = None) -> Optional[Union[dict, list]]:
+        """
+
+        :param assetClass: specify the asset class of the contract.
+            Available values:
+            Stock: STK, Option: OPT, Future: FUT, Contract For Difference: CFD,
+            Warrant: WAR, Forex: SWP, Mutual Fund: FND, Bond: BND, Inter-Commodity Spreads: ICS
+        """
+        if assetClass not in TradingSchedule.VALID_ASSETCLASSES:
+            raise ValueError(f'Unknown asset class: {assetClass}')
+
+        fields = {
+            "assetClass": assetClass,
+            "symbol": symbol,
+        }
+        if exchange is not None:
+            fields["exchange"] = exchange
+        if exchangeFilter is not None:
+            fields["exchangeFilter"] = exchangeFilter
+        return super().__call__(fields)
+
+
 class MarketDataHistory(Request):
     """Get historical market Data for given conid, length of data is controlled by 'period' and 'bar'.
 
@@ -262,19 +302,6 @@ class MarketDataHistory(Request):
             "outsideRth": outsideRth
         }
         return super().__call__(fields)
-
-
-class StockInfo(Request):
-    api_path = "/iserver/secdef/search"
-    method = "POST"
-
-    def __call__(self, symbol: str, by_name: bool = False, secType: str = "STK") -> Optional[Union[dict, list]]:
-        body = {
-            "symbol": symbol,
-            "name": by_name,
-            "secType": secType
-        }
-        return super().__call__(body)
 
 
 class PreviewOrders(Request):
