@@ -91,6 +91,7 @@ class Server(object):
         Reference:
         Ford, G. S. (2019). Estimating Betas in Practice: Alternatives that Matter and Those that Do Not.
         https://phoenix-center.org/perspectives/Perspective19-01Final.pdf
+        THIS FUNCTION MAY BE TOTALLY WRONG, I'M NOT RESPONSIBLE FOR ANY DAMAGES
         """
         # IRX: 13 Week Treasury Bill
         irx = self['IRX', period, bar]

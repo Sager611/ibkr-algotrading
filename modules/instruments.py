@@ -277,20 +277,6 @@ class Portfolio(object):
             self.insert(stocks)
 
     @property
-    def wealth(self) -> float:
-        """Amount of currency allocated to stock shares, or initial wealth if portfolio is empty.
-
-        Wealth property is read-only.
-        """
-        # if there is no allocation, we still haven't
-        # bought any stock
-        if np.allclose(self._alloc, 0.0):
-            return self._initial_wealth
-
-        stocks_value = np.array([stk.value()[0] for stk in self._stocks])
-        return np.inner(stocks_value, self._alloc)
-
-    @property
     def commission(self) -> float:
         """Return the total **estimated** commission that has decreased the wealth accross all orders.
 
@@ -308,8 +294,8 @@ class Portfolio(object):
         return self._stocks.copy()
 
     @property
-    def alloc(self) -> np.ndarray:
-        """Allocation property is read-only.
+    def shares(self) -> np.ndarray:
+        """Shares property is read-only.
 
         This array corresponds to the fraction of stock we are currently in possesion
         of, for each of the stocks.
@@ -323,7 +309,7 @@ class Portfolio(object):
         This array corresponds to the distribution of wealth accross the stocks.
         """
         stocks_value = np.array([stk.value()[0] for stk in self._stocks])
-        return (self._alloc * stocks_value) / self.wealth
+        return (self._alloc * stocks_value) / self.wealth()
 
     @property
     def orders(self) -> pd.DataFrame:
@@ -332,6 +318,30 @@ class Portfolio(object):
         Orders property is read-only.
         """
         return self._orders.copy()
+
+    def wealth(self, date: Optional[pd.Timestamp] = None) -> float:
+        """Amount of currency allocated to stock shares, or initial wealth if portfolio is empty.
+
+        :param date: indicates the date at which we want to retrieve our wealth.
+            If `None`, function returns a best-effort attempt at the latest portfolio wealth.
+        :type date: pandas timestamp
+        """
+        # if there are no orders, we still haven't
+        # bought any stock
+        if len(self._orders) == 0:
+            return self._initial_wealth
+
+        if date is None:
+            # current allocated shares
+            shares = self._alloc
+        else:
+            # allocated shares at "date"
+            i = self._orders.index.get_loc(date, method='ffill')
+            shares = self._orders.iloc[i].values
+
+        stocks_value = self.get_stocks_value(date=date)
+
+        return np.inner(stocks_value, shares)
 
     def copy(self, stocks: Optional[Iterable[Stock]] = None) -> 'Portfolio':
         ins = Portfolio(self._initial_wealth, stocks)
@@ -370,7 +380,7 @@ class Portfolio(object):
         bar = self._stocks[0].bar
         for stk in self._stocks[1:]:
             if stk.bar != bar:
-                raise ValueError('Cannot calculate Sharpe ratio because there are different bars'
+                raise ValueError('Cannot calculate returns because there are different bars'
                                  f'{self._stocks[0]} has bar "{bar}" while {stk} has bar "{stk.bar}"')
 
         # if end_date is not provided, we use the closest one to today
@@ -401,8 +411,9 @@ class Portfolio(object):
                 [utils.fill_like(stk.hist[order_date:next_date], ref)['close'].values
                  for stk in self._stocks]
             ).T
-            # value each date for the portfolio
-            port_val = (stocks_value * self._orders.iloc[i].values[np.newaxis, :]).sum(axis=1)
+            shares = self._orders.iloc[i].values[np.newaxis, :]
+            # portfolio value by date
+            port_val = (stocks_value * shares).sum(axis=1)
             rets = np.empty_like(port_val)
             rets[1:] = port_val[1:] / port_val[:-1] - 1
 
@@ -511,7 +522,7 @@ class Portfolio(object):
         stocks_value = self.get_stocks_value(date)
 
         # wealth that we have at our disposition
-        W = self.wealth
+        W = self.wealth(date)
 
         adj_W = W
         comm = 0.0
@@ -633,6 +644,8 @@ def _validate_portfolio_weights(stocks, weights):
         f'Allocated wealth distribution does not sum to 1! Sums to: {weights.sum()}'
     assert len(stocks) == len(weights), \
         f'There is a different amount of stocks and weights! {len(stocks)} != {len(weights)}'
+    assert (weights >= 0).all(), \
+        f'Negative weights are not allowed. weights: {weights}'
 
 def _validate_preview_order_data(data):
     if type(data) is not dict:
