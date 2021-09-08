@@ -54,9 +54,9 @@ class Request():
                 extra_str = ''
                 if r.status // 500 == 1:
                     extra_str = '(Internal server error)'
-                _LOGGER.warn(f'Non-json response: {str(r.data)} \n\t\t'
-                             f'Status was: {r.status} {extra_str} \n\t\t'
-                             f'Body was: {encoded_body}')
+                _LOGGER.error(f'Non-json response: {str(r.data)} \n\t\t'
+                              f'Status was: {r.status} {extra_str} \n\t\t'
+                              f'Body was: {encoded_body}')
                 return
         elif self.method == "GET":
             r = HTTP.request(self.method, url, headers=headers, fields=body_or_fields)
@@ -67,9 +67,9 @@ class Request():
                 extra_str = ''
                 if r.status // 500 == 1:
                     extra_str = '(Internal server error)'
-                _LOGGER.warn(f'Non-json response: {str(r.data)} \n\t\t'
-                             f'Status was: {r.status} {extra_str} \n\t\t'
-                             f'Fields were: {body_or_fields}')
+                _LOGGER.error(f'Non-json response: {str(r.data)} \n\t\t'
+                              f'Status was: {r.status} {extra_str} \n\t\t'
+                              f'Fields were: {body_or_fields}')
                 return
         else:
             raise TypeError(f'Method not supported: "{self.method}".')

@@ -1,10 +1,12 @@
 """Contains classes defining the different financial instruments."""
 
-import concurrent
 import logging
+import pickle
 from functools import cached_property
 from typing import Iterable, Optional, Union
 from datetime import datetime
+from pathlib import Path
+from concurrent.futures.thread import ThreadPoolExecutor
 
 import pandas as pd
 import numpy as np
@@ -62,7 +64,27 @@ class Stock(BaseInstrument):
         self._hist_data = hist_data
 
         # historical data
+        _validate_hist_data(hist_data)
         self.hist = _hist_data_to_dataframe(hist_data)
+
+    @classmethod
+    def load(cls, path: str) -> Optional['Stock']:
+        # if it is not saved
+        if not Path(path + '.attrs.pkl').exists():
+            return None
+
+        with open(path + '.attrs.pkl', 'rb') as f:
+            attrs = pickle.load(f)
+            _info_data = attrs.pop("_info_data")
+            _hist_data = attrs.pop("_hist_data")
+            ins = Stock(info_data=_info_data, hist_data=_hist_data)
+            ins.conid = attrs.pop("conid")
+            ins.symbol = attrs.pop("symbol")
+            ins.companyHeader = attrs.pop("companyHeader")
+            ins.companyName = attrs.pop("companyName")
+
+        ins.hist = pd.read_pickle(path + '.hist.pkl')
+        return ins
 
     @cached_property
     def bar(self) -> pd.Timedelta:
@@ -98,6 +120,20 @@ class Stock(BaseInstrument):
         self._hist_data = stk._hist_data
 
         self.hist = stk.hist
+
+    def save(self, path: str) -> None:
+        attrs = {
+            "conid": self.conid,
+            "symbol": self.symbol,
+            "companyHeader": self.companyHeader,
+            "companyName": self.companyName,
+            "_info_data": self._info_data,
+            "_hist_data": self._hist_data
+        }
+        with open(path + '.attrs.pkl', 'wb') as f:
+            pickle.dump(attrs, f)
+
+        self.hist.to_pickle(path + '.hist.pkl')
 
     def get_returns(self) -> pd.DataFrame:
         """Get returns in the bar of the stock (daily, hourly, etc.)."""
@@ -233,6 +269,14 @@ class Stock(BaseInstrument):
         return False
 
 
+def _validate_hist_data(hist_data: dict) -> None:
+    if type(hist_data) is not dict:
+        raise TypeError(f'Historical data is not a dict. It is of type: {type(hist_data)}')
+
+    if "data" not in hist_data:
+        raise ValueError('Historical data is in an incorrect format. \n\t\t'
+                         f'Data: {hist_data}')
+
 def _hist_data_to_dataframe(hist_data: dict) -> pd.DataFrame:
     """Prepare the input dict to a pandas DataFrame."""
     data = hist_data["data"]
@@ -254,7 +298,10 @@ def _hist_data_to_dataframe(hist_data: dict) -> pd.DataFrame:
 
 
 class Portfolio(object):
-    """Portfolio class to handle the sell, buy and statistics of multiple stocks."""
+    """Portfolio class to handle the sell, buy and statistics of multiple stocks.
+
+    TODO: take dividends into account
+    """
 
     _initial_wealth: float
     _stocks: np.ndarray
@@ -607,7 +654,7 @@ class Portfolio(object):
         commissions = []
         shares_values = []
         totals = []
-        with concurrent.futures.ThreadPoolExecutor() as executor:
+        with ThreadPoolExecutor() as executor:
             # async start requests
             futures = [
                 executor.submit(_prev_order, (d, stk))

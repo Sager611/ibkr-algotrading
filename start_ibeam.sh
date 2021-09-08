@@ -16,4 +16,4 @@ case "$out" in
 esac
 
 sudo docker run -v "${PWD}/container_inputs":/srv/inputs --env-file env.list \
-    --name "ibkr-algotrading" -p 5000:5000 voyz/ibeam
+    -p 5000:5000 voyz/ibeam

@@ -1,13 +1,13 @@
 """Server module to handle requests independently of the computing algorithm(s)."""
 
-from functools import cached_property
-import re
 import time
 import threading
-import concurrent
 import warnings
 import logging
+from pathlib import Path
+from functools import cached_property
 from datetime import datetime
+from concurrent.futures.thread import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -36,7 +36,7 @@ class Server(object):
     _simulated: bool
 
     def __init__(self) -> None:
-        self._stock_cache = StockCache(maxmem=100, maxstorage=200)
+        self._stock_cache = StockCache(maxmem=100, maxstorage=500)
         self._portfolios = []
         self._simulated = False
 
@@ -127,7 +127,7 @@ class Server(object):
 
         # sum of an empty numpy array is 0.0
         b = self.balance[0] - self.portfolios_wealth().sum()
-        p_W = pf.wealth
+        p_W = pf.wealth()
         if b < p_W:
             raise ValueError('Cannot add portfolio because it allocates too much wealth. '
                              f'{p_W} > {b}')
@@ -135,7 +135,8 @@ class Server(object):
         pf.server = self
 
     def portfolios_wealth(self) -> np.ndarray:
-        return np.array([pf.wealth for pf in self._portfolios])
+        # TODO: may be smart to do this in parallel
+        return np.array([pf.wealth() for pf in self._portfolios])
 
     def get_portfolios(self) -> list[Portfolio]:
         """Return a copy of the server's portfolios.
@@ -178,14 +179,22 @@ class Server(object):
         stock_names: Union[str, Iterable]
         period: str
         bar: str
+        extra_args: dict
         if type(args) is tuple:
             stock_names = args[0]
             period = '1m' if len(args) < 2 else args[1]
             bar = '1h' if len(args) < 3 else args[2]
+            extra_args = {} if len(args) < 4 else args[3]
         else:
             stock_names = args
             period = '1m'
             bar = '1h'
+            extra_args = {}
+
+        if "ignore_errors" in extra_args:
+            ignore_errors = extra_args["ignore_errors"]
+        else:
+            ignore_errors = False
 
         if type(stock_names) is str:
             stock_names = [stock_names]
@@ -198,30 +207,47 @@ class Server(object):
         # check the requested period and bar make sense
         _validate_period_bar(period, bar)
 
+        def _stk_getter(args):
+            try:
+                stk = self._stock_cache[args]
+                return stk
+            except Exception as e:
+                if ignore_errors:
+                    _LOGGER.error(f'Exception raised for stock "{args[0]}": \n\t\t{e}')
+                    return None
+                else:
+                    raise e
+
         # Request stocks in parallel.
         # Order is preserved.
         # There's a limit of 5 concurrent requests.
-        with concurrent.futures.ThreadPoolExecutor() as executor:
+        with ThreadPoolExecutor(max_workers=NB_REQUEST_LIMIT) as executor:
             # we only know that stock_names is iterable, so for convenience we make it a list
             names = [n for n in stock_names]
-            stocks = []
 
-            # max 5 concurrent market data requests according to IBKR
-            for i in range(0, 1 + len(names) // NB_REQUEST_LIMIT):
-                # async start requests
-                futures = [
-                    executor.submit(
-                        self._stock_cache.__getitem__,
-                        (name, period, bar)
-                    )
-                    for name in names[i * NB_REQUEST_LIMIT:(i+1) * NB_REQUEST_LIMIT]
-                ]
-                # join threads
-                stocks += [f.result() for f in futures]
+            # async start requests
+            futures = [
+                executor.submit(
+                    _stk_getter,
+                    (name, period, bar)
+                )
+                for name in names
+            ]
+            # join threads
+            stocks = [f.result() for f in futures]
+
+            # remove None values arising from handled exceptions
+            stocks_, stock_names_ = [], []
+            for stk, name in zip(stocks, stock_names):
+                if stk is not None:
+                    stocks_ += [stk]
+                    stock_names_ += [name]
+            stocks = stocks_
+            stock_names = stock_names_
 
         # validate that stocks are correct
-        for stock, name in zip(stocks, stock_names):
-            _validate_stock_equality(name, period, bar, stock)
+        for stk, name in zip(stocks, stock_names):
+            _validate_stock_equality(name, period, bar, stk)
 
         if not was_stock_names_iterable:
             return stocks[0]
@@ -256,7 +282,7 @@ def _validate_period_bar(period, bar):
 def _validate_stock_equality(stock_name, period, bar, target_stock):
     """Check if the requested stock is in fact equivalent to the stock found."""
     if target_stock.symbol != stock_name:
-        raise ValueError(f'Requested stock (name "{stock_name}") does not match target stock (name "{target_stock.name}").')
+        raise ValueError(f'Requested stock (name "{stock_name}") does not match target stock (name "{target_stock.symbol}").')
     # TODO: check period and bar
     # if target_stock.period != period:
         # raise ValueError(f'Requested stock (period "{period}") does not match target stock (period "{target_stock.period}").')
@@ -267,11 +293,15 @@ def _validate_stock_equality(stock_name, period, bar, target_stock):
 class StockCache(object):
     """Automatically updates the historical of the cached stocks.
 
-    TODO: implement :param:`maxstorage`, which indicates how many timeseries will
-    be stored in the disk.
+    You can specify :param:`maxstorage`, which indicates how many timeseries will
+    be stored in the disk. By default, a directory called `.cache/` will be created
+    in the project's root directory.
 
     :param maxmem: max number of entries in the cache
     :type maxmem: int
+    :param maxstorage: max number of entries saved in disk.
+        If set to 0, then no entries will be saved in disk.
+    :type maxstorage: int
     :param _cache: contains as keys the stock's symbol and bar and values the
         stock (:class:`modules.Stock`) themselves.
     :type _cache: dict[tuple[str, str], Stock]
@@ -279,22 +309,27 @@ class StockCache(object):
 
     maxmem: int
     maxstorage: int
+    save_path: Path
     _cache: dict[tuple[str, str], Stock]
     _cache_barriers: dict[tuple[str, str], threading.Lock]
     _main_barrier: threading.Lock
     _bar_threads: dict[str, TracedThread]
     _n_misses: int
+    _n_storage_misses: int
     _callbacks: dict[str, list[Callable]]
 
     def __init__(self, maxmem: int = 128, maxstorage: int = 0) -> None:
         """Constructor."""
         self.maxmem = maxmem
         self.maxstorage = maxstorage
+        # basically, "../.cache"
+        self.save_path = Path(__file__).parent.parent.joinpath('.cache')
         self._cache = {}
         self._cache_barriers = {}
         self._main_barrier = threading.Lock()
         self._bar_threads = {}
         self._n_misses = 0
+        self._n_storage_misses = 0
         self._callbacks = {}
 
     @property
@@ -308,6 +343,7 @@ class StockCache(object):
         ins._cache = {
             k: stk.copy() for k, stk in self._cache.items()
         }
+        # locks in the copy will be unlocked
         ins._cache_barriers = {
             k: threading.Lock() for k in self._cache_barriers.keys()
         }
@@ -318,6 +354,7 @@ class StockCache(object):
             for bar in self._bar_threads.keys()
         }
         ins._n_misses = self._n_misses
+        ins._n_storage_misses = self._n_storage_misses
         ins._callbacks = self._callbacks.copy()
         return ins
 
@@ -327,6 +364,7 @@ class StockCache(object):
         self._main_barrier = sc._main_barrier
         self._bar_threads = sc._bar_threads
         self._n_misses = sc._n_misses
+        self._n_storage_misses = sc._n_storage_misses
         self._callbacks = sc._callbacks
 
     def clear(self) -> None:
@@ -335,6 +373,7 @@ class StockCache(object):
             self._cache_barriers.clear()
             self._bar_threads.clear()
             self._n_misses = 0
+            self._n_storage_misses = 0
 
     def start(self) -> None:
         # for copied StackCaches, whose threads are not started by default
@@ -356,6 +395,53 @@ class StockCache(object):
     def get_autoupdate_threads(self) -> dict[str, TracedThread]:
         """Return dictionnary of threads updating stocks' historical."""
         return self._bar_threads
+
+    def save_stock(self, key: tuple[str, str], stk: Optional[Stock] = None) -> None:
+        # if no storage is allowed
+        if self.maxstorage <= 0:
+            return
+
+        self.save_path.mkdir(exist_ok=True)
+        if stk is None:
+            # we assume we are already under the main barrier
+            with self._cache_barriers[key]:
+                path = self._get_stk_path(key)
+                self._cache[key].save(path)
+        else:
+            # if we specify already the stock, we don't need any locks
+            path = self._get_stk_path(key)
+            stk.save(path)
+
+    def load_stock(self, key: tuple[str, str]) -> Optional[Stock]:
+        # if no storage is allowed
+        if self.maxstorage <= 0:
+            return None
+
+        # we assume we are already under the main barrier
+        path = self._get_stk_path(key)
+        stk = Stock.load(path)
+        # stock is not in storage
+        if stk is None:
+            return None
+        # remove stocks following LRU policy
+        files = [f for f in self.save_path.glob('*.attrs.pkl')]
+        N = len(files)
+        if N > self.maxstorage:
+            oldest_time = files[0].lstat().st_mtime
+            oldest_file = files[0]
+            for f in files[1:]:
+                t = f.lstat().st_mtime
+                if t < oldest_time:
+                    oldest_time = t
+                    oldest_file = f
+            # delete oldest
+            oldest_file.unlink(missing_ok=True)
+            _LOGGER.info(f'Removed "{oldest_file}" from StockCache\'s storage.')
+        _LOGGER.info(f'Loaded "{stk}" from StockCache\'s storage.')
+        return stk
+
+    def _get_stk_path(self, key: tuple[str, str]) -> str:
+        return str(self.save_path.joinpath(f'{"_".join(key)}'))
 
     def _hist_update(self, bar: str, sleep_interval: float = 0.5) -> None:
         """Update all cached stocks with certain bar time-interval.
@@ -387,6 +473,7 @@ class StockCache(object):
 
             _validate_period_bar(period, bar)
             _update_stock(stk, period, bar)
+            self.save_stock(key=(stk.symbol, bar), stk=stk)
 
             _LOGGER.info(f'Updated: {str(stk)} - bar: {bar} - added period: {period}')
 
@@ -407,7 +494,7 @@ class StockCache(object):
                         stocks += [stk]
 
                 # Request stocks in parallel.
-                with concurrent.futures.ThreadPoolExecutor() as executor:
+                with ThreadPoolExecutor() as executor:
                     # max 5 concurrent market data requests according to IBKR
                     for i in range(0, 1 + len(stocks) // NB_REQUEST_LIMIT):
                         # async start requests
@@ -453,6 +540,7 @@ class StockCache(object):
         # we are in a critical section
         self._main_barrier.acquire()
         try:
+            # whether the stock is in cache
             if key in self._cache:
                 with self._cache_barriers[key]:
                     stock = self._cache[key]
@@ -478,24 +566,39 @@ class StockCache(object):
                 # increment miss count
                 self._n_misses += 1
 
-                # Evict according to LRU policy.
-                # This is possible thanks to the order-preserving
-                # python dicts.
-                keys = list(self._cache.keys())
-                if len(keys) >= self.maxmem:
-                    self._cache.pop(keys[0])
-
-                # create lock for cache entry
-                self._cache_barriers[key] = threading.Lock()
-                # temporarely add cache entry
-                self._cache[key] = None
-                # immediately lock it
-                self._cache_barriers[key].acquire()
-
                 # create hist auto-update if it does not exist
                 if bar not in self._bar_threads:
                     self._bar_threads[bar] = TracedThread(target=self._hist_update, args=(bar,))
                     self._bar_threads[bar].start()
+
+                # create lock for cache entry
+                self._cache_barriers[key] = threading.Lock()
+                # immediately lock it
+                self._cache_barriers[key].acquire()
+
+                # we may also have the stock saved in storage.
+                # this function also handles max storage limits
+                stock = self.load_stock(key=key)
+                # if it is NOT saved in storage
+                if stock is None:
+                    # increment storage miss count
+                    self._n_storage_misses += 1
+
+                    # Evict according to LRU policy.
+                    # This is possible thanks to the order-preserving
+                    # python dicts.
+                    keys = list(self._cache.keys())
+                    if len(keys) >= self.maxmem:
+                        self._cache.pop(keys[0])
+                    # temporarely add cache entry
+                    self._cache[key] = None
+                else:
+                    # if it IS saved in storage
+                    self._cache[key] = stock
+                    # end of critical section
+                    self._main_barrier.release()
+                    self._cache_barriers[key].release()
+                    return stock
         except BaseException as e:
             # it's important to release the lock, even with an exception ;)
             self._main_barrier.release()
@@ -517,6 +620,9 @@ class StockCache(object):
 
         # unlock this stock's mutex
         self._cache_barriers[key].release()
+
+        # save in storage
+        self.save_stock(key, stock)
 
         return stock
 
