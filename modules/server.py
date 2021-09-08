@@ -172,6 +172,9 @@ class Server(object):
         self._portfolios = new_portfolios
         self._simulated = state._simulated
 
+    def add_callback(self, func: Callable, bar: Optional[str] = None) -> None:
+        self._stock_cache.add_callback(func, bar)
+
     def __getitem__(self, args) -> Union[Stock, list[Stock]]:
         if args is None:
             raise ValueError('You must provide the symbol of a stock.')
@@ -381,7 +384,13 @@ class StockCache(object):
             if not t.is_alive():
                 t.start()
 
-    def add_callback(self, bar: str, func: Callable) -> None:
+    def add_callback(self, func: Callable, bar: Optional[str] = None) -> None:
+        if bar is None:
+            # add callback for all bars
+            for b in self._bar_threads.keys():
+                self.add_callback(func, b)
+            return
+
         with self._main_barrier:
             if bar not in self._callbacks:
                 self._callbacks[bar] = []

@@ -419,7 +419,9 @@ class Portfolio(object):
         self._commission = pf._commission
         self._orders = pf._orders
 
-    def get_returns(self, end_date: Optional[pd.Timestamp] = None) -> pd.DataFrame:
+    def get_returns(self,
+                    end_date: Optional[pd.Timestamp] = None,
+                    start_date: Optional[pd.Timestamp] = None) -> pd.DataFrame:
         """Provide portfolio's returns in time."""
         if len(self._stocks) == 0:
             raise ValueError('Cannot calculate returns because there are no stocks in the portfolio')
@@ -438,7 +440,8 @@ class Portfolio(object):
             end_date = self._stocks[0].get_closest_date(end_date)
 
         order_dates = [
-            self._stocks[0].get_closest_date(d) for d in self._orders.index if d <= end_date
+            self._stocks[0].get_closest_date(d)
+            for d in self._orders.index if (start_date is None or start_date <= d) and d <= end_date
         ]
 
         returns = pd.DataFrame(index=pd.DatetimeIndex([]), columns=['returns'])
@@ -452,6 +455,8 @@ class Portfolio(object):
             if order_date > next_date:
                 raise ValueError('Saved orders are not in chronological order: '
                                  f'{order_date} > {next_date} i: {i}')
+            if start_date is not None and i == 0:
+                order_date = start_date
 
             ref = self._stocks[0].hist[order_date:next_date]
             stocks_value = np.stack(
@@ -482,7 +487,9 @@ class Portfolio(object):
 
         return returns
 
-    def sharpe(self, end_date: Optional[pd.Timestamp] = None) -> float:
+    def sharpe(self,
+               end_date: Optional[pd.Timestamp] = None,
+               start_date: Optional[pd.Timestamp] = None) -> float:
         """Calculate the Sharpe ratio of the portfolio.
 
         Computes the following formula:
@@ -501,7 +508,7 @@ class Portfolio(object):
                 raise ValueError('Cannot calculate Sharpe ratio because there are different bars'
                                  f'{self._stocks[0]} has bar "{bar}" while {stk} has bar "{stk.bar}"')
 
-        R_p = self.get_returns(end_date=end_date)
+        R_p = self.get_returns(end_date=end_date, start_date=start_date)
 
         # retrieve risk-free rates
         R_f = [

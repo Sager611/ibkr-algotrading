@@ -29,22 +29,24 @@ if __name__ == "__main__":
     srv = Server()
     srv.start()
 
-    # ensemble algorithm
-    hedge = Hedge(srv)
+    # TODO: do it non-simulated
+    with srv.simulated():
+        # retrieve stocks
+        start_t = time.perf_counter()
+        stocks = srv[STOCKS, '1y', '1d', dict(ignore_errors=True)]
+        end_t = time.perf_counter()
+        print(f'Stock request time: {end_t-start_t:.2f}s')
 
-    # retrieve stocks
-    start_t = time.perf_counter()
-    stocks = srv[STOCKS, '1y', '1d', dict(ignore_errors=True)]
-    end_t = time.perf_counter()
-    print(f'Stock request time: {end_t-start_t:.2f}s')
+        # create 100 USD portfolio
+        # TODO: portfolio and hedge shouldn't be created each time, but saved and loaded from disk
+        pf = Portfolio(wealth=100, stocks=stocks)
 
-    # create 100 USD portfolio
-    # TODO: this shouldn't be created each time, but saved and loaded from disk
-    pf = Portfolio(wealth=100, stocks=stocks)
+        srv.add_portfolio(pf)
 
-    srv.add_portfolio(pf)
+        # ensemble algorithm
+        hedge = Hedge(srv, pf, stocks[0].bar)
 
-    # add sharpe ratio maximizer expert
-    hedge.add(experts.Sharpe)
+        # add sharpe ratio maximizer expert
+        hedge.add(experts.Sharpe)
 
-    hedge.start()
+        hedge.start()
