@@ -128,10 +128,14 @@ def get_transaction_commission(transact: np.ndarray, diff: np.ndarray, stocks: n
 def fill_like(df1: pd.DataFrame, df2: pd.DataFrame) -> pd.DataFrame:
     """Return copy of df1 with added rows so as to match the indices in df2.
 
+    The resulting dataframe will have the same rows as :param:`df2`.
+
     Inputs are assumed to be historical data.
     """
+    # TODO: improve performance!
     ret = df1.iloc[0:0, :].copy()
     for i in df2.index:
         j = df1.index.get_loc(i, method='ffill')
         ret.loc[i] = df1.iloc[j]
+    ret = ret[df2.index[0]:df2.index[-1]]
     return ret

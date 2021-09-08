@@ -15,6 +15,7 @@
 !notebooks
 !notebooks/01 - Introduction.ipynb
 !notebooks/02 - Portfolios.ipynb
+!notebooks/03 - Algorithms.ipynb
 
 !tests
 !tests/*

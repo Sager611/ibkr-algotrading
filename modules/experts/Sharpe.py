@@ -22,8 +22,9 @@ def init():
 def get_returns(stocks, weights, start_date, end_date):
     ref = stocks[0].hist[start_date:end_date]
     # we retrieve the values for the stocks in the same dates
+    # TODO: perhaps do this in parallel?
     stocks_value = np.stack(
-        [utils.fill_like(stk.hist[start_date:end_date], ref)['close'].values
+        [utils.fill_like(stk.hist, ref)['close'].values
          for stk in stocks]
     ).T
     norm_vals = stocks_value / stocks_value[0, :]
@@ -51,7 +52,7 @@ def predict(pf: Portfolio,
     :param srv: server context
     :type srv: :class:`modules.server.Server`
     :param start_date: start date for historical data.
-        Defaults to `None`, which uses oldest available historical data
+        Defaults to `None`, which uses oldest available historical data for all stocks
     :type start_date: pandas Timestamp
     :param end_date: end date for historical data.
         Defaults to `None`, which uses the prediction date :param:`date` minus
@@ -64,6 +65,10 @@ def predict(pf: Portfolio,
 
     if start_date is None:
         start_date = stocks[0].hist.index[0]
+        for stk in stocks[1:]:
+            d = stk.hist.index[0]
+            if d > start_date:
+                start_date = d
     if end_date is None:
         end_date = date - stocks[0].bar
 
