@@ -132,10 +132,17 @@ def fill_like(df1: pd.DataFrame, df2: pd.DataFrame) -> pd.DataFrame:
 
     Inputs are assumed to be historical data.
     """
-    # TODO: improve performance!
-    ret = df1.iloc[0:0, :].copy()
-    for i in df2.index:
-        j = df1.index.get_loc(i, method='ffill')
-        ret.loc[i] = df1.iloc[j]
-    ret = ret[df2.index[0]:df2.index[-1]]
+    # TODO: we can still improve performance
+    ret = df2.copy()
+    i = 0
+    j = 0
+    N = len(df2.index)
+    M = len(df1.index)
+    while i < N:
+        d = df2.index[i]
+        while j < M and d > df1.index[j]:
+            j += 1
+        j -= 1
+        ret.iloc[i] = df1.iloc[j]
+        i += 1
     return ret
