@@ -471,7 +471,7 @@ class StockCache(object):
             time.sleep(sleep_interval)
         time.sleep(offset % sleep_interval)
 
-        def _stk_thread(stk):
+        def stk_thread(stk):
             # this method is called from a thread that locks
             # the cache, so access to stk should not collide
             # with other threads.
@@ -508,7 +508,7 @@ class StockCache(object):
                     for i in range(0, 1 + len(stocks) // NB_REQUEST_LIMIT):
                         # async start requests
                         futures = [
-                            executor.submit(_stk_thread, stk)
+                            executor.submit(stk_thread, stk)
                             for stk in stocks[i * NB_REQUEST_LIMIT:(i+1) * NB_REQUEST_LIMIT]
                         ]
                         # join threads
@@ -554,7 +554,9 @@ class StockCache(object):
                 with self._cache_barriers[key]:
                     stock = self._cache[key]
                 # if stored stock's period is shorter, we need to update it
-                if pd.Timestamp.today() - stock.hist.index[0] >= utils.ibkr_to_timedelta(period):
+                stored_period = pd.Timestamp.today() - stock.hist.index[0]
+                asked_period = utils.ibkr_to_timedelta(period)
+                if stored_period >= asked_period:
                     # end of critical section
                     self._main_barrier.release()
                     return stock
@@ -566,6 +568,7 @@ class StockCache(object):
                         new_stock = _request_stock(name, period, bar)
                         # set stock to newly gotten stock
                         stock.set(new_stock)
+                        _LOGGER.info(f'Updated: {str(stock)} - bar: {bar} - added period: {period}')
                     return stock
             # this condition should not be possibly true! (since we init the _cache to None)
             # elif key in self._cache_barriers:
@@ -606,7 +609,32 @@ class StockCache(object):
                     self._cache[key] = stock
                     # end of critical section
                     self._main_barrier.release()
-                    self._cache_barriers[key].release()
+
+                    # if stored stock's period is shorter, we need to update it
+                    stored_period = pd.Timestamp.today() - stock.hist.index[0]
+                    asked_period = utils.ibkr_to_timedelta(period)
+                    if stored_period < asked_period:
+                        # request new stock
+                        new_stock = _request_stock(name, period, bar)
+                        # set stock to newly gotten stock
+                        stock.set(new_stock)
+                        # save in storage
+                        self.save_stock(key, stock)
+                        _LOGGER.info(f'Updated: {str(stock)} - bar: {bar} - added period: {period}')
+                    # if storage is outdated we also need to update it
+                    bar_td = utils.ibkr_to_timedelta(bar)
+                    if pd.Timestamp.today() - stock.hist.index[-1] > bar_td:
+                        today = datetime.today().timestamp()
+                        secs = (today - stock.hist.index[-1].timestamp())
+                        period = utils.seconds_to_ibkr(secs)
+
+                        _validate_period_bar(period, bar)
+                        _update_stock(stock, period, bar)
+                        self.save_stock(key=(stock.symbol, bar), stk=stock)
+
+                        _LOGGER.info(f'Updated: {str(stock)} - bar: {bar} - added period: {period}')
+
+                        self._cache_barriers[key].release()
                     return stock
         except BaseException as e:
             # it's important to release the lock, even with an exception ;)

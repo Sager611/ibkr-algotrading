@@ -57,7 +57,9 @@ class BaseAlgorithm(object):
         if weights is None:
             return
         else:
-            self.portfolio.order(weights)
+            # TODO: perform order
+            # self.portfolio.order(weights)
+            pass
 
     @abstractmethod
     def output(self, expert_outputs: np.ndarray, date: pd.Timestamp) -> Optional[np.ndarray]:

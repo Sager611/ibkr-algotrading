@@ -1,7 +1,9 @@
 """This expert maximizes the Sharpe ratio of a portfolio."""
 
+import time
 import logging
 from typing import Optional
+from concurrent.futures.thread import ThreadPoolExecutor
 
 import pandas as pd
 import numpy as np
@@ -19,14 +21,7 @@ def init():
     pass
 
 
-def get_returns(stocks, weights, start_date, end_date):
-    ref = stocks[0].hist[start_date:end_date]
-    # we retrieve the values for the stocks in the same dates
-    # TODO: perhaps do this in parallel?
-    stocks_value = np.stack(
-        [utils.fill_like(stk.hist, ref)['close'].values
-         for stk in stocks]
-    ).T
+def get_returns(weights, stocks_value):
     norm_vals = stocks_value / stocks_value[0, :]
     # normalized portfolio value by date
     norm_port_vals = (norm_vals * weights).sum(axis=1)
@@ -79,20 +74,39 @@ def predict(pf: Portfolio,
     # create weight boundaries
     bounds = ((0, 1),) * len(stocks)
     # initial guess
-    init_guess = [0.25] * len(stocks)
+    init_guess = [1 / len(stocks)] * len(stocks)
     # factor so sharpe ratio is the same no matter the bar.
     # we assume a 252 trading year
     K = np.sqrt(pd.Timedelta(days=252) / stocks[0].bar)
 
+    t1 = time.perf_counter()
+    ref = stocks[0].hist[start_date:end_date]
+    # we retrieve the values for the stocks in the same dates
+    stocks_value = [ref['close'].values]
+    with ThreadPoolExecutor() as executor:
+        # async start requests
+        futures = [
+            executor.submit(
+                lambda s: utils.fill_like(s.hist, ref)['close'].values, stk)
+            for stk in stocks[1:]
+        ]
+        for stk, f in zip(stocks, futures):
+            stocks_value += [f.result()]
+            print(f'Done: {stk}')
+    stocks_value = np.stack(stocks_value).T
+    t2 = time.perf_counter()
+    _LOGGER.info(f'Retrieving stock values took {t2-t1:.4g}s')
+
     def neg_sharpe(weights):
-        returns = get_returns(stocks, weights, start_date, end_date)
+        returns = get_returns(weights, stocks_value)
         # we assume 0 risk-free rate
         sharpe = K * np.mean(returns) / np.std(returns)
         # log output
-        w_str = '[' + ', '.join([f'{w:.2g}' for w in weights]) + ']'
-        _LOGGER.info(f'sharpe: {sharpe : .2f} \n\t\tweights: {w_str}')
+        _LOGGER.info(f'sharpe: {sharpe : .2f}')
         return -sharpe
 
     opt_results = minimize(neg_sharpe, init_guess, method='SLSQP', bounds=bounds, constraints=cons)
-    _LOGGER.info('Finished Sharpe ratio optimizer')
+    # log output
+    w_str = '[' + ', '.join([f'{w:.2g}' for w in opt_results.x]) + ']'
+    _LOGGER.info(f'Finished Sharpe ratio optimizer. \n\t\tOptimal weights: {w_str}')
     return opt_results.x

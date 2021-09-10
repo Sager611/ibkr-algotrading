@@ -132,7 +132,7 @@ def fill_like(df1: pd.DataFrame, df2: pd.DataFrame) -> pd.DataFrame:
 
     Inputs are assumed to be historical data.
     """
-    # TODO: we can still improve performance
+    # TODO: we can still improve performance. perhaps numpy?
     ret = df2.copy()
     i = 0
     j = 0
