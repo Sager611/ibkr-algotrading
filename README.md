@@ -3,6 +3,10 @@
 
 This is a personal project which builds a simple framework to do algotrading on Interactive Brokers, using [ibeam](https://github.com/Voyz/ibeam/tree/b43d4f4a636e237461c7fd8a8024d5a8da7375be).
 
+**At the moment, this project does not perform any real transactions.**
+
+Feel free to check the [notebooks](notebooks/) for a showcase of the different features.
+
 ## Install
 
 Run `make`.
