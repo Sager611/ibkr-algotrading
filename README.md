@@ -1,4 +1,7 @@
 ![flake8 and pytests](https://github.com/Sager611/ibkr-algotrading/actions/workflows/python-app.yml/badge.svg)
+# IBKR Algotrading
+
+This is a personal project which builds a simple framework to do algotrading on Interactive Brokers, using [ibeam](https://github.com/Voyz/ibeam/tree/b43d4f4a636e237461c7fd8a8024d5a8da7375be).
 
 ## Install
 
