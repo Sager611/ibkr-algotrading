@@ -102,7 +102,7 @@ def predict(pf: Portfolio,
         # we assume 0 risk-free rate
         sharpe = K * np.mean(returns) / np.std(returns)
         # log output
-        _LOGGER.info(f'sharpe: {sharpe : .2f}')
+        _LOGGER.debug(f'sharpe: {sharpe : .2f}')
         return -sharpe
 
     opt_results = minimize(neg_sharpe, init_guess, method='SLSQP', bounds=bounds, constraints=cons)

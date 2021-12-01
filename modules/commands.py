@@ -20,7 +20,7 @@ if 'HTTP' not in globals():
         HTTP = urllib3.PoolManager(cert_reqs='REQUIRED', ca_certs=CACERT)
     except Exception as e:
         # do not use certificates
-        _LOGGER.warn(f'Could not use certificates! Exception: {e}')
+        _LOGGER.warning(f'Could not use certificates! Exception: {e}')
         # TODO: this is a bad idea !
         HTTP = urllib3.PoolManager(cert_reqs='CERT_NONE',
                                    assert_hostname=False)
@@ -195,9 +195,9 @@ class MarketData(Request):
                         break
 
             if repeat:
-                _LOGGER.warn(f'Repeating market data request on conid(s) "{conids}" '
-                             'since there wasn\'t an appropiate response. \n\t\t'
-                             f'Response was: {data}')
+                _LOGGER.warning(f'Repeating market data request on conid(s) "{conids}" '
+                                'since there wasn\'t an appropiate response. \n\t\t'
+                                f'Response was: {data}')
                 # for some reason IBKR asks us to request our accounts information
                 # before requesting market data, o.w. we supposedly get a bad response.
                 BrokerageAccounts()()
@@ -208,7 +208,7 @@ class MarketData(Request):
                 break
 
         if i >= 9:
-            _LOGGER.warn(f'Repeated market data request on conids "{conids}" too many times! (10)')
+            _LOGGER.warning(f'Repeated market data request on conids "{conids}" too many times! (10)')
 
         return data
 

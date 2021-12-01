@@ -51,4 +51,4 @@ def test_fill_like():
     utils.fill_like(stk1.hist, stk2.hist)
     t2 = time.perf_counter()
     print(f'Performance: {t2-t1:.4g}s')
-    assert t2-t1 <= 1e-1, 'Too slow!'
+    assert t2-t1 <= 2e-1, 'Too slow!'
